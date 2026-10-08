@@ -1,0 +1,6 @@
+// Rust 版资源脚本，等价于 C++ 版的 src/app.rc。
+// 只负责嵌入应用图标；「通用控件 v6」的主题清单由 build.rs 通过
+// 链接器参数 /MANIFESTDEPENDENCY 嵌入（对应 C++ 里的 #pragma comment(linker, ...)）。
+#include "resource.h"
+
+IDI_APP ICON "icon.ico"

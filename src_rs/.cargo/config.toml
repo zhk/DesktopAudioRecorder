@@ -1,0 +1,9 @@
+# 静态链接 CRT（等价于 C++ 版的 /MT），使 exe 不依赖 VC++ Redist，
+# 拷到任意 Win8+ 机器即可运行。
+#
+# 注意：cargo 只读取「当前工作目录及其祖先」下的 .cargo/config.toml，
+# 因此请在 src_rs 目录内执行 cargo build（这也是最自然的方式）：
+#     cd src_rs
+#     cargo build --release
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

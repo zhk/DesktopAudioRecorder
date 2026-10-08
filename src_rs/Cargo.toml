@@ -1,0 +1,33 @@
+[package]
+name = "desktop-audio-recorder"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.82"
+description = "桌面音频录制（Windows）：WASAPI Loopback + 麦克风混音 + Media Foundation MP3 编码"
+license = "MIT"
+
+# 独立的桌面音频录制小工具（Rust 版，等价于仓库根目录的 C++ 版本）：
+#   WASAPI Loopback 采集 -> PCM16 -> Media Foundation MP3 编码
+# 不依赖 libobs / OBS 源码树，直接用系统组件。
+#
+# 刻意不依赖任何第三方 crate：目标机器无法访问 crates.io，所有 Win32 / COM /
+# Media Foundation 接口都在 src/ffi 下按 Windows SDK 头文件手写声明，直接链接
+# 系统 DLL（user32 / ole32 / mfplat / mfreadwrite / avrt / comctl32 / shell32）。
+[dependencies]
+
+[lib]
+name = "desktop_audio_recorder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "desktop-audio-recorder"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# 与 C++ 版一样不依赖 VC++ Redist：panic=abort 免去 unwind 表，
+# CRT 静态链接由 .cargo/config.toml 的 +crt-static 打开。
+panic = "abort"
+strip = true
