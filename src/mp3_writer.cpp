@@ -6,7 +6,8 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 
-namespace {
+namespace
+{
 
 std::wstring HrMessage(const wchar_t *what, HRESULT hr)
 {
@@ -24,11 +25,12 @@ Mp3Writer::~Mp3Writer()
 
 bool Mp3Writer::Open(const std::wstring &path, uint32_t sampleRate, uint16_t channels, uint32_t bitrateBps,
 		     std::wstring &error)
-{
+		     {
 	Close();
 
 	HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		error = HrMessage(L"MFStartup 失败", hr);
 		return false;
 	}
@@ -38,7 +40,8 @@ bool Mp3Writer::Open(const std::wstring &path, uint32_t sampleRate, uint16_t cha
 	bool ok = false;
 
 	hr = MFCreateSinkWriterFromURL(path.c_str(), nullptr, nullptr, &m_sink);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		error = HrMessage(L"创建输出文件失败", hr);
 		goto fail;
 	}
@@ -53,7 +56,8 @@ bool Mp3Writer::Open(const std::wstring &path, uint32_t sampleRate, uint16_t cha
 	// 注意：不要设置 MF_MT_AUDIO_BITS_PER_SAMPLE 等额外属性，
 	// 内置 MP3 编码器枚举的输出类型没有该属性，多了会导致匹配失败
 	hr = m_sink->AddStream(outType, &m_stream);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		error = HrMessage(L"AddStream(MP3) 失败，系统可能缺少内置 MP3 编码器", hr);
 		goto fail;
 	}
@@ -69,13 +73,15 @@ bool Mp3Writer::Open(const std::wstring &path, uint32_t sampleRate, uint16_t cha
 	inType->SetUINT32(MF_MT_AUDIO_VALID_BITS_PER_SAMPLE, 16);
 	inType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
 	hr = m_sink->SetInputMediaType(m_stream, inType, nullptr);
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		error = HrMessage(L"设置编码器输入格式失败", hr);
 		goto fail;
 	}
 
 	hr = m_sink->BeginWriting();
-	if (FAILED(hr)) {
+	if (FAILED(hr))
+	{
 		error = HrMessage(L"BeginWriting 失败", hr);
 		goto fail;
 	}
@@ -96,8 +102,10 @@ fail:
 		outType->Release();
 	if (inType)
 		inType->Release();
-	if (!ok) {
-		if (m_sink) {
+	if (!ok)
+	{
+		if (m_sink)
+		{
 			m_sink->Release();
 			m_sink = nullptr;
 		}
@@ -121,7 +129,8 @@ void Mp3Writer::Push(const int16_t *data, size_t frames)
 
 void Mp3Writer::Run()
 {
-	while (true) {
+	while (true)
+	{
 		std::vector<int16_t> chunk;
 		{
 			std::unique_lock<std::mutex> lk(m_mtx);
@@ -145,10 +154,12 @@ void Mp3Writer::WriteChunk(const int16_t *data, size_t frames)
 	IMFSample *sample = nullptr;
 
 	HRESULT hr = MFCreateMemoryBuffer(bytes, &buffer);
-	if (SUCCEEDED(hr)) {
+	if (SUCCEEDED(hr))
+	{
 		BYTE *dst = nullptr;
 		hr = buffer->Lock(&dst, nullptr, nullptr);
-		if (SUCCEEDED(hr)) {
+		if (SUCCEEDED(hr))
+		{
 			memcpy(dst, data, bytes);
 			buffer->Unlock();
 			buffer->SetCurrentLength(bytes);
@@ -158,7 +169,8 @@ void Mp3Writer::WriteChunk(const int16_t *data, size_t frames)
 		hr = MFCreateSample(&sample);
 	if (SUCCEEDED(hr))
 		hr = sample->AddBuffer(buffer);
-	if (SUCCEEDED(hr)) {
+	if (SUCCEEDED(hr))
+	{
 		const int64_t duration = static_cast<int64_t>(frames) * 10000000LL / m_rate;
 		sample->SetSampleTime(m_time);
 		sample->SetSampleDuration(duration);
@@ -171,7 +183,8 @@ void Mp3Writer::WriteChunk(const int16_t *data, size_t frames)
 	if (sample)
 		sample->Release();
 
-	if (FAILED(hr) && !m_failed) {
+	if (FAILED(hr) && !m_failed)
+	{
 		m_failed = true;
 		m_error = HrMessage(L"MP3 写入失败", hr);
 	}
@@ -181,8 +194,7 @@ void Mp3Writer::Close()
 {
 	if (!m_open)
 		return;
-
-	{
+ {
 		std::lock_guard<std::mutex> lk(m_mtx);
 		m_running = false;
 	}
@@ -190,15 +202,18 @@ void Mp3Writer::Close()
 	if (m_thread.joinable())
 		m_thread.join();
 
-	if (!m_failed && m_time == 0) {
+	if (!m_failed && m_time == 0)
+	{
 		// MP3 sink 没有收到任何样本时 Finalize 必然失败（空流），直接删掉空文件
 		m_failed = true;
 		m_error = L"未捕获到任何音频数据（该设备可能没有在播放声音），空文件已删除";
 	}
 
-	if (!m_failed) {
+	if (!m_failed)
+	{
 		HRESULT hr = m_sink->Finalize();
-		if (FAILED(hr)) {
+		if (FAILED(hr))
+		{
 			m_failed = true;
 			m_error = HrMessage(L"Finalize 失败", hr);
 		}

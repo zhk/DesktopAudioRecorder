@@ -14,7 +14,8 @@
 // 关键约束：参考流与麦克风流按样本 1:1 对齐消费（两者的相对偏移是常数，
 // 由滤波器窗口吸收）；因此参考信号先进入 FIFO，Process 时逐样本取出。
 // 两设备时钟漂移通过 FIFO 上限丢旧数据兜底。
-class EchoCanceller {
+class EchoCanceller
+{
 public:
 	// channels 为麦克风声道数（1 或 2），tailMs 为回声窗口长度
 	void Configure(uint32_t sampleRate, uint16_t channels, uint32_t tailMs = 100, float step = 0.1f);

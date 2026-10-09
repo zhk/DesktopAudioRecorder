@@ -19,7 +19,8 @@
 //   cap.Begin(onData, onError);          // 真正开始采集，PCM16 数据从回调吐出
 //   ...
 //   cap.Stop();                          // 停止并回收线程
-class WasapiCapture {
+class WasapiCapture
+{
 public:
 	// 交错存放的 PCM16 数据，frames 为每声道帧数
 	using DataFn = std::function<void(const int16_t *data, uint32_t frames)>;

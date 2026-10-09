@@ -7,11 +7,23 @@ project(desktop-audio-recorder VERSION 1.0.0 LANGUAGES CXX)
 
 add_executable(desktop-audio-recorder WIN32
     src/main.cpp
+    src/localization.cpp
+    src/localization.h
+    src/logger.cpp
+    src/logger.h
+    src/recorder.cpp
+    src/recorder.h
     src/wasapi_capture.cpp
+    src/wasapi_capture.h
     src/mp3_writer.cpp
+    src/mp3_writer.h
     src/audio_mixer.cpp
+    src/audio_mixer.h
     src/echo_canceller.cpp
+    src/echo_canceller.h
     src/teams_watcher.cpp
+    src/teams_watcher.h
+    src/resource.h
     src/app.rc
 )
 

@@ -5,7 +5,8 @@
 #include <audiopolicy.h>
 #include <mmdeviceapi.h>
 
-namespace {
+namespace
+{
 
 bool IsTeamsProcess(DWORD pid)
 {
@@ -36,7 +37,8 @@ bool TeamsWatcher::MeetingActive()
 	if (FAILED(hr))
 		return false;
 
-	do {
+	do
+	{
 		IMMDevice *device = nullptr;
 		if (FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device)))
 			break;
@@ -56,16 +58,19 @@ bool TeamsWatcher::MeetingActive()
 
 		int count = 0;
 		sessionEnum->GetCount(&count);
-		for (int i = 0; i < count && !active; ++i) {
+		for (int i = 0; i < count && !active; ++i)
+		{
 			IAudioSessionControl *ctl = nullptr;
 			if (FAILED(sessionEnum->GetSession(i, &ctl)))
 				continue;
 
 			AudioSessionState state;
-			if (SUCCEEDED(ctl->GetState(&state)) && state == AudioSessionStateActive) {
+			if (SUCCEEDED(ctl->GetState(&state)) && state == AudioSessionStateActive)
+			{
 				IAudioSessionControl2 *ctl2 = nullptr;
 				if (SUCCEEDED(ctl->QueryInterface(__uuidof(IAudioSessionControl2),
-								  reinterpret_cast<void **>(&ctl2)))) {
+								  reinterpret_cast<void **>(&ctl2))))
+								  {
 					DWORD pid = 0;
 					if (SUCCEEDED(ctl2->GetProcessId(&pid)) && pid != 0 && IsTeamsProcess(pid))
 						active = true;

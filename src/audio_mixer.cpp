@@ -49,7 +49,8 @@ void AudioMixer::PushDesktop(const int16_t *data, uint32_t frames)
 	if (!m_fn)
 		return;
 
-	if (!m_micEnabled) {
+	if (!m_micEnabled)
+	{
 		m_fn(data, frames); // 不开麦克风时直通，零开销
 		return;
 	}
@@ -60,9 +61,11 @@ void AudioMixer::PushDesktop(const int16_t *data, uint32_t frames)
 
 	const size_t samples = static_cast<size_t>(frames) * m_channels;
 	m_mixBuf.resize(samples);
-	for (size_t i = 0; i < samples; ++i) {
+	for (size_t i = 0; i < samples; ++i)
+	{
 		int32_t v = data[i];
-		if (!m_micPcm.empty()) {
+		if (!m_micPcm.empty())
+		{
 			v += m_micPcm.front();
 			m_micPcm.pop_front();
 		}
@@ -83,17 +86,22 @@ void AudioMixer::PushMic(const int16_t *data, uint32_t frames)
 
 	// 2) 重采样到输出速率（线性插值，会议语音足够），保持原生声道数。
 	//    统一经 m_rsBuf 中转：AEC 需要就地修改，而 deque 非连续存储。
-	if (m_micRate == m_rate) {
+	if (m_micRate == m_rate)
+	{
 		m_rsBuf.assign(m_micIn.begin(), m_micIn.end());
 		m_micIn.clear();
 		m_micPos = 0.0;
-	} else {
+	}
+	else
+	{
 		m_rsBuf.clear();
 		size_t avail = m_micIn.size() / m_micChannels;
-		while (m_micPos + 1.0 < static_cast<double>(avail)) {
+		while (m_micPos + 1.0 < static_cast<double>(avail))
+		{
 			const size_t i0 = static_cast<size_t>(m_micPos);
 			const double frac = m_micPos - i0;
-			for (uint16_t ch = 0; ch < m_micChannels; ++ch) {
+			for (uint16_t ch = 0; ch < m_micChannels; ++ch)
+			{
 				const int32_t a = m_micIn[i0 * m_micChannels + ch];
 				const int32_t b = m_micIn[(i0 + 1) * m_micChannels + ch];
 				m_rsBuf.push_back(static_cast<int16_t>(a + (b - a) * frac));
@@ -114,15 +122,21 @@ void AudioMixer::PushMic(const int16_t *data, uint32_t frames)
 		m_aec.Process(rsData, rsFrames);
 
 	// 4) 声道映射为输出声道数，进入待混音缓冲
-	for (uint32_t f = 0; f < rsFrames; ++f) {
-		if (m_micChannels == m_channels) {
+	for (uint32_t f = 0; f < rsFrames; ++f)
+	{
+		if (m_micChannels == m_channels)
+		{
 			for (uint16_t ch = 0; ch < m_channels; ++ch)
 				m_micPcm.push_back(rsData[static_cast<size_t>(f) * m_micChannels + ch]);
-		} else if (m_channels == 2 && m_micChannels == 1) {
+		}
+		else if (m_channels == 2 && m_micChannels == 1)
+		{
 			int16_t v = rsData[f]; // 单声道麦克风 -> 双声道
 			m_micPcm.push_back(v);
 			m_micPcm.push_back(v);
-		} else if (m_channels == 1 && m_micChannels == 2) {
+		}
+		else if (m_channels == 1 && m_micChannels == 2)
+		{
 			int32_t l = rsData[static_cast<size_t>(f) * 2];
 			int32_t r = rsData[static_cast<size_t>(f) * 2 + 1];
 			m_micPcm.push_back(static_cast<int16_t>((l + r) / 2));

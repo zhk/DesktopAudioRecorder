@@ -11,7 +11,8 @@
 // 双路混音器：桌面(loopback)为主时钟基准，麦克风经线性插值重采样对齐、
 // 可选回声消除后逐样本相加。两路 Push 可来自不同线程；输出格式 = 桌面格式。
 // 设备时钟漂移的处理：麦克风缓冲设上限（超出丢最旧数据），欠载时补静音。
-class AudioMixer {
+class AudioMixer
+{
 public:
 	using MixedFn = std::function<void(const int16_t *data, uint32_t frames)>;
 

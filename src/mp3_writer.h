@@ -18,7 +18,8 @@ struct IMFSinkWriter;
 //   w.Open(path, 48000, 2, 192000, err);
 //   w.Push(data, frames);   // 可来自其他线程
 //   w.Close();              // 冲刷队列并 Finalize
-class Mp3Writer {
+class Mp3Writer
+{
 public:
 	Mp3Writer() = default;
 	~Mp3Writer();

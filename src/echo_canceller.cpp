@@ -44,11 +44,15 @@ void EchoCanceller::PushReference(const int16_t *data, uint32_t frames, uint16_t
 	if (m_w == 0 || refChannels == 0)
 		return;
 
-	for (uint32_t f = 0; f < frames; ++f) {
+	for (uint32_t f = 0; f < frames; ++f)
+	{
 		float x;
-		if (refChannels == 1) {
+		if (refChannels == 1)
+		{
 			x = static_cast<float>(data[f]);
-		} else {
+		}
+		else
+		{
 			int32_t l = data[static_cast<size_t>(f) * refChannels];
 			int32_t r = data[static_cast<size_t>(f) * refChannels + 1];
 			x = (l + r) * 0.5f;
@@ -64,10 +68,12 @@ void EchoCanceller::Process(int16_t *mic, uint32_t frames)
 	if (m_w == 0)
 		return;
 
-	for (uint32_t f = 0; f < frames; ++f) {
+	for (uint32_t f = 0; f < frames; ++f)
+	{
 		// 逐样本取参考，保证参考/麦克风 1:1 对齐消费
 		float x = 0.f;
-		if (!m_refFifo.empty()) {
+		if (!m_refFifo.empty())
+		{
 			x = m_refFifo.front();
 			m_refFifo.pop_front();
 		}
@@ -97,7 +103,8 @@ void EchoCanceller::Process(int16_t *mic, uint32_t frames)
 			--m_hold;
 		const bool freeze = m_hold > 0;
 
-		for (uint16_t ch = 0; ch < m_ch; ++ch) {
+		for (uint16_t ch = 0; ch < m_ch; ++ch)
+		{
 			const size_t si = static_cast<size_t>(f) * m_ch + ch;
 			const float s = static_cast<float>(mic[si]);
 			float *h = m_h[ch].data();
@@ -106,7 +113,8 @@ void EchoCanceller::Process(int16_t *mic, uint32_t frames)
 			// h[i] 对应窗口内第 i 旧（i=0 最旧，i=m_w-1 最新）的参考样本
 			float y = 0.f;
 			uint32_t ri = m_pos;
-			for (uint32_t i = 0; i < m_w; ++i) {
+			for (uint32_t i = 0; i < m_w; ++i)
+			{
 				y += h[i] * m_win[ri];
 				if (++ri == m_w)
 					ri = 0;
@@ -115,10 +123,12 @@ void EchoCanceller::Process(int16_t *mic, uint32_t frames)
 			const float e = s - y; // 残差 = 去回声后的信号
 
 			// NLMS 系数更新（双讲时冻结，避免语音干扰滤波器收敛）
-			if (!freeze) {
+			if (!freeze)
+			{
 				const float g = static_cast<float>(m_mu * e / (m_norm + 1e-9));
 				ri = m_pos;
-				for (uint32_t i = 0; i < m_w; ++i) {
+				for (uint32_t i = 0; i < m_w; ++i)
+				{
 					h[i] += g * m_win[ri];
 					if (++ri == m_w)
 						ri = 0;
