@@ -1,4 +1,5 @@
 #include "wasapi_capture.h"
+#include "localization.h"
 
 #include <audioclient.h>
 #include <avrt.h>
@@ -62,32 +63,32 @@ bool InitLoopback(const std::wstring &deviceId, bool loopback, Ctx &c, std::wstr
 				      __uuidof(IMMDeviceEnumerator), reinterpret_cast<void **>(&c.enumerator));
 	if (FAILED(hr))
 	{
-		error = HrMessage(L"创建 MMDeviceEnumerator 失败", hr);
+		error = HrMessage(S(L"Errors", L"error_wasapi_mme"), hr);
 		return false;
 	}
 
-	const wchar_t *what = loopback ? L"播放" : L"录音";
+	const wchar_t *errorKey = loopback ? L"error_wasapi_open_playback" : L"error_wasapi_open_record";
 	if (deviceId.empty())
 		hr = c.enumerator->GetDefaultAudioEndpoint(loopback ? eRender : eCapture, eConsole, &c.device);
 	else
 		hr = c.enumerator->GetDevice(deviceId.c_str(), &c.device);
 	if (FAILED(hr))
 	{
-		error = HrMessage((std::wstring(L"打开") + what + L"设备失败").c_str(), hr);
+		error = HrMessage(S(L"Errors", errorKey), hr);
 		return false;
 	}
 
 	hr = c.device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void **>(&c.client));
 	if (FAILED(hr))
 	{
-		error = HrMessage(L"激活 IAudioClient 失败", hr);
+		error = HrMessage(S(L"Errors", L"error_wasapi_activate"), hr);
 		return false;
 	}
 
 	hr = c.client->GetMixFormat(&c.wfx);
 	if (FAILED(hr))
 	{
-		error = HrMessage(L"GetMixFormat 失败", hr);
+		error = HrMessage(S(L"Errors", L"error_wasapi_mixformat"), hr);
 		return false;
 	}
 
@@ -110,20 +111,20 @@ bool InitLoopback(const std::wstring &deviceId, bool loopback, Ctx &c, std::wstr
 			c.isFloat = false;
 		else
 		{
-			error = L"不支持的混音格式（仅支持 float32 / int16）";
+			error = S(L"Errors", L"error_wasapi_format");
 			return false;
 		}
 	}
 	else
 	{
-		error = L"不支持的混音格式（仅支持 float32 / int16）";
+		error = S(L"Errors", L"error_wasapi_format");
 		return false;
 	}
 
 	c.evData = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 	if (!c.evData)
 	{
-		error = L"CreateEvent 失败";
+		error = S(L"Errors", L"error_wasapi_createevent");
 		return false;
 	}
 
@@ -134,21 +135,21 @@ bool InitLoopback(const std::wstring &deviceId, bool loopback, Ctx &c, std::wstr
 	hr = c.client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 100 * 10000, 0, c.wfx, nullptr);
 	if (FAILED(hr))
 	{
-		error = HrMessage(L"IAudioClient::Initialize 失败", hr);
+		error = HrMessage(S(L"Errors", L"error_wasapi_initialize"), hr);
 		return false;
 	}
 
 	hr = c.client->SetEventHandle(c.evData);
 	if (FAILED(hr))
 	{
-		error = HrMessage(L"SetEventHandle 失败", hr);
+		error = HrMessage(S(L"Errors", L"error_wasapi_setevent"), hr);
 		return false;
 	}
 
 	hr = c.client->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void **>(&c.capture));
 	if (FAILED(hr))
 	{
-		error = HrMessage(L"获取 IAudioCaptureClient 失败", hr);
+		error = HrMessage(S(L"Errors", L"error_wasapi_getcapture"), hr);
 		return false;
 	}
 
@@ -244,7 +245,7 @@ void WasapiCapture::Run()
 		{
 			HRESULT hr = c.client->Start();
 			if (FAILED(hr))
-				fatal = HrMessage(L"IAudioClient::Start 失败", hr);
+				fatal = HrMessage(S(L"Errors", L"error_wasapi_start"), hr);
 
 			std::vector<int16_t> chunk;
 			while (m_running && fatal.empty())
@@ -264,9 +265,9 @@ void WasapiCapture::Run()
 						break;
 					if (FAILED(hr))
 					{
-						fatal = (hr == AUDCLNT_E_DEVICE_INVALIDATED)
-								? L"音频设备已断开或失效"
-								: HrMessage(L"GetBuffer 失败", hr);
+fatal = (hr == AUDCLNT_E_DEVICE_INVALIDATED)
+					? S(L"Errors", L"error_wasapi_device_lost")
+					: HrMessage(S(L"Errors", L"error_wasapi_getbuffer"), hr);
 						break;
 					}
 

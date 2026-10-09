@@ -1,4 +1,5 @@
 #include "mp3_writer.h"
+#include "localization.h"
 
 #include <windows.h>
 
@@ -31,7 +32,7 @@ bool Mp3Writer::Open(const std::wstring &path, uint32_t sampleRate, uint16_t cha
 	HRESULT hr = MFStartup(MF_VERSION, MFSTARTUP_FULL);
 	if (FAILED(hr))
 	{
-		error = HrMessage(L"MFStartup 失败", hr);
+		error = HrMessage(S(L"Errors", L"error_mp3_mfstartup"), hr);
 		return false;
 	}
 
@@ -42,7 +43,7 @@ bool Mp3Writer::Open(const std::wstring &path, uint32_t sampleRate, uint16_t cha
 	hr = MFCreateSinkWriterFromURL(path.c_str(), nullptr, nullptr, &m_sink);
 	if (FAILED(hr))
 	{
-		error = HrMessage(L"创建输出文件失败", hr);
+		error = HrMessage(S(L"Errors", L"error_mp3_create_file"), hr);
 		goto fail;
 	}
 
@@ -58,7 +59,7 @@ bool Mp3Writer::Open(const std::wstring &path, uint32_t sampleRate, uint16_t cha
 	hr = m_sink->AddStream(outType, &m_stream);
 	if (FAILED(hr))
 	{
-		error = HrMessage(L"AddStream(MP3) 失败，系统可能缺少内置 MP3 编码器", hr);
+		error = HrMessage(S(L"Errors", L"error_mp3_addstream"), hr);
 		goto fail;
 	}
 
@@ -75,14 +76,14 @@ bool Mp3Writer::Open(const std::wstring &path, uint32_t sampleRate, uint16_t cha
 	hr = m_sink->SetInputMediaType(m_stream, inType, nullptr);
 	if (FAILED(hr))
 	{
-		error = HrMessage(L"设置编码器输入格式失败", hr);
+		error = HrMessage(S(L"Errors", L"error_mp3_set_format"), hr);
 		goto fail;
 	}
 
 	hr = m_sink->BeginWriting();
 	if (FAILED(hr))
 	{
-		error = HrMessage(L"BeginWriting 失败", hr);
+		error = HrMessage(S(L"Errors", L"error_mp3_beginwrite"), hr);
 		goto fail;
 	}
 
@@ -186,7 +187,7 @@ void Mp3Writer::WriteChunk(const int16_t *data, size_t frames)
 	if (FAILED(hr) && !m_failed)
 	{
 		m_failed = true;
-		m_error = HrMessage(L"MP3 写入失败", hr);
+		m_error = HrMessage(S(L"Errors", L"error_mp3_write"), hr);
 	}
 }
 
@@ -206,7 +207,7 @@ void Mp3Writer::Close()
 	{
 		// MP3 sink 没有收到任何样本时 Finalize 必然失败（空流），直接删掉空文件
 		m_failed = true;
-		m_error = L"未捕获到任何音频数据（该设备可能没有在播放声音），空文件已删除";
+		m_error = S(L"Errors", L"error_mp3_no_data");
 	}
 
 	if (!m_failed)
@@ -215,7 +216,7 @@ void Mp3Writer::Close()
 		if (FAILED(hr))
 		{
 			m_failed = true;
-			m_error = HrMessage(L"Finalize 失败", hr);
+			m_error = HrMessage(S(L"Errors", L"error_mp3_finalize"), hr);
 		}
 	}
 	m_sink->Release();
