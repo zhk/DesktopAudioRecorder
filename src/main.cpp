@@ -10,6 +10,7 @@
 #include <shellapi.h>
 
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -41,17 +42,23 @@ constexpr int IDC_EDIT_STATUS = 1004;
 constexpr int IDC_COMBO_MIC = 1005;
 constexpr int IDC_CHK_AEC = 1006;
 constexpr int IDC_CHK_AUTOTEAMS = 1007;
+constexpr int IDC_BTN_OPENFOLDER = 1008;
 constexpr UINT_PTR TIMER_ID = 1;
 constexpr UINT_PTR TIMER_WATCH = 2;
 constexpr UINT WM_RECORD_ERROR = WM_APP + 1;
 constexpr UINT WM_TRAYICON = WM_APP + 2;
+constexpr UINT WM_RELOAD_UI = WM_APP + 3;
 constexpr UINT TRAY_UID = 1;
 constexpr int IDM_TRAY_OPEN = 2001;
 constexpr int IDM_TRAY_EXIT = 2002;
+constexpr int IDM_SYS_ABOUT = 3001;
+constexpr int IDM_LANG_ZHCN = 3002;
+constexpr int IDM_LANG_ENUS = 3003;
 constexpr uint32_t BITRATE = 192000; // 192 kbps
 constexpr int WATCH_GRACE_POLLS = 5; // 会议结束防抖：连续 5 次未检测到才停录（2s×5=10s）
 
-HWND g_hwnd{}, g_combo{}, g_comboMic{}, g_btnStart{}, g_btnRefresh{}, g_status{}, g_chkAec{}, g_chkAutoTeams{};
+HWND g_hwnd{}, g_combo{}, g_comboMic{}, g_btnStart{}, g_btnRefresh{}, g_btnOpenFolder{}, g_status{}, g_chkAec{}, g_chkAutoTeams{}, g_recordCountText{};
+int g_recordCount = 0;
 std::vector<std::wstring> g_renderIds; // 与播放下拉框索引一一对应
 std::vector<std::wstring> g_micIds;    // 麦克风下拉框：索引 0 = 不录制，之后对应此数组
 
@@ -65,9 +72,229 @@ bool g_autoStarted = false;  // 当前录制由 Teams 看门狗自动触发
 bool g_autoSuppress = false; // 用户手动停止了自动录制：同一场会议内不再自动开始
 int g_inactivePolls = 0;     // 会议结束防抖计数
 ULONGLONG g_startTick = 0;
+std::wstring g_startTime;
+
+std::string WToUtf8(const std::wstring &w)
+{
+	int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+	std::string s(len, '\0');
+	WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &s[0], len, nullptr, nullptr);
+	while (!s.empty() && s.back() == '\0') s.pop_back();
+	return s;
+}
+
 std::wstring g_outPath;
 std::wstring g_deviceName;
 std::wstring g_micName;
+
+// ---- i18n ----
+std::wstring g_lang;
+std::map<std::wstring, std::wstring> g_str;
+
+const wchar_t *S(const wchar_t *section, const wchar_t *key)
+{
+	auto it = g_str.find(std::wstring(section) + L"." + key);
+	if (it != g_str.end())
+		return it->second.c_str();
+	return L"?";
+}
+
+std::wstring DetectSystemLocale()
+{
+	const LANGID lang = GetUserDefaultUILanguage();
+	return PRIMARYLANGID(lang) == LANG_CHINESE_SIMPLIFIED ? L"zh-CN" : L"en-US";
+}
+
+std::wstring ExeDir()
+{
+	wchar_t buf[MAX_PATH]{};
+	GetModuleFileNameW(nullptr, buf, MAX_PATH);
+	return std::filesystem::path(buf).parent_path().wstring();
+}
+
+std::wstring ExeName()
+{
+	wchar_t buf[MAX_PATH]{};
+	GetModuleFileNameW(nullptr, buf, MAX_PATH);
+	return std::filesystem::path(buf).stem().wstring();
+}
+
+void LoadLangFile(const std::wstring &locale)
+{
+	g_str.clear();
+	wchar_t iniPath[MAX_PATH]{};
+	swprintf_s(iniPath, L"%s\\lang\\%s.ini", ExeDir().c_str(), locale.c_str());
+	if (GetFileAttributesW(iniPath) == INVALID_FILE_ATTRIBUTES)
+		return;
+
+	// Read entire file ourselves (avoid GetPrivateProfileSectionW caching/buffer issues)
+	HANDLE hFile = CreateFileW(iniPath, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+				   FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (hFile == INVALID_HANDLE_VALUE)
+		return;
+	DWORD fileSize = GetFileSize(hFile, nullptr);
+	std::wstring content(fileSize / 2 + 1, L'\0');
+	DWORD read = 0;
+	ReadFile(hFile, &content[0], fileSize, &read, nullptr);
+	CloseHandle(hFile);
+	content.resize(read / 2);
+
+	// Skip BOM
+	size_t pos = 0;
+	if (content.size() > 0 && content[0] == 0xFEFF)
+		pos = 1;
+
+	std::wstring_view secName;
+	auto addEntry = [&](std::wstring_view sec, std::wstring_view key, std::wstring_view val) {
+		std::wstring v(val);
+		size_t p;
+		while ((p = v.find(L"\\n")) != std::wstring::npos)
+			v.replace(p, 2, L"\r\n");
+		g_str[std::wstring(sec) + L"." + std::wstring(key)] = std::move(v);
+	};
+
+	while (pos < content.size()) {
+		// Find end of line
+		size_t eol = content.find(L'\n', pos);
+		if (eol == std::wstring::npos)
+			eol = content.size();
+		// Trim \r at end
+		size_t end = eol;
+		while (end > pos && (content[end - 1] == L'\r' || content[end - 1] == L'\n'))
+			--end;
+
+		std::wstring_view line(content.data() + pos, end - pos);
+		if (!line.empty()) {
+			if (line.front() == L'[' && line.back() == L']') {
+				secName = line.substr(1, line.size() - 2);
+			} else if (!secName.empty()) {
+				auto eq = line.find(L'=');
+				if (eq != std::wstring_view::npos) {
+					auto key = line.substr(0, eq);
+					auto val = line.substr(eq + 1);
+					addEntry(secName, key, val);
+				}
+			}
+		}
+		pos = eol + 1;
+	}
+}
+
+void LoadConfig()
+{
+	wchar_t ini[MAX_PATH]{};
+	swprintf_s(ini, L"%s\\%s.ini", ExeDir().c_str(), ExeName().c_str());
+	wchar_t locale[16]{};
+	GetPrivateProfileStringW(L"Language", L"locale", L"", locale, 16, ini);
+	if (locale[0] == L'\0')
+		g_lang = DetectSystemLocale();
+	else
+		g_lang = locale;
+	LoadLangFile(g_lang);
+}
+
+void SaveConfig()
+{
+	wchar_t ini[MAX_PATH]{};
+	swprintf_s(ini, L"%s\\%s.ini", ExeDir().c_str(), ExeName().c_str());
+	WritePrivateProfileStringW(L"Language", L"locale", g_lang.c_str(), ini);
+}
+
+void RecreateControls(HWND hwnd); // forward decl
+
+void SetStatus(const std::wstring &text);
+void RefreshDevices();
+void FillDeviceCombo(HWND combo, std::vector<std::wstring> &ids, EDataFlow flow, bool addNone);
+
+static bool g_created = false;
+
+void ReloadUI()
+{
+	HWND hwnd = g_hwnd;
+	if (!hwnd) return;
+	KillTimer(hwnd, TIMER_WATCH);
+
+	// Destroy all child controls from last to first (avoid EnumChildWindows skip bug)
+	HWND child = GetWindow(hwnd, GW_CHILD);
+	while (child) {
+		HWND next = GetWindow(child, GW_HWNDNEXT);
+		DestroyWindow(child);
+		child = next;
+	}
+	g_combo = g_comboMic = g_btnStart = g_btnRefresh = g_btnOpenFolder = g_status = g_chkAec = g_chkAutoTeams = g_recordCountText = nullptr;
+
+	RecreateControls(hwnd);
+}
+
+void RecreateControls(HWND hwnd)
+{
+	HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+	auto make = [&](const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int w, int h,
+			int id) {
+		HWND c = CreateWindowExW(0, cls, text, style | WS_CHILD | WS_VISIBLE, x, y, w, h, hwnd,
+					 reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
+		SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+		return c;
+	};
+
+	make(L"STATIC", S(L"UI", L"label_playback"), SS_LEFT, 12, 16, 64, 18, -1);
+	g_combo = make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 80, 12, 352, 300, IDC_COMBO_DEVICE);
+	g_btnRefresh = make(L"BUTTON", S(L"UI", L"btn_refresh"), 0, 440, 11, 68, 25, IDC_BTN_REFRESH);
+	make(L"STATIC", S(L"UI", L"label_mic"), SS_LEFT, 12, 50, 64, 18, -1);
+	g_comboMic = make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 80, 46, 352, 300, IDC_COMBO_MIC);
+	g_btnStart = make(L"BUTTON", S(L"UI", L"btn_start"), 0, 12, 84, 130, 30, IDC_BTN_START);
+	g_btnOpenFolder = make(L"BUTTON", S(L"UI", L"btn_open_folder"), 0, 12, 118, 100, 25, IDC_BTN_OPENFOLDER);
+	g_recordCountText = make(L"STATIC", L"", SS_LEFT, 116, 122, 70, 18, -1);
+	wchar_t countBuf[32]{};
+	swprintf_s(countBuf, L"%s: %d", S(L"UI", L"record_count"), g_recordCount);
+	SetWindowTextW(g_recordCountText, countBuf);
+	g_chkAec = make(L"BUTTON", S(L"UI", L"chk_aec"), BS_AUTOCHECKBOX, 156, 88, 160, 22, IDC_CHK_AEC);
+	Button_SetCheck(g_chkAec, BST_CHECKED);
+	g_chkAutoTeams = make(L"BUTTON", S(L"UI", L"chk_auto_teams"), BS_AUTOCHECKBOX, 316, 88, 160, 22,
+			      IDC_CHK_AUTOTEAMS);
+
+	g_status = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+				   WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
+					   WS_VSCROLL,
+				   12, 152, 496, 86, hwnd,
+				   reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_STATUS)),
+				   nullptr, nullptr);
+	SendMessageW(g_status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+
+	SetStatus(std::wstring(S(L"Status", L"ready")) + L"\r\n" +
+		  S(L"Status", L"initial_help") + L"\r\n" +
+		  S(L"Status", L"legal_warning"));
+
+	HMENU sysMenu = GetSystemMenu(hwnd, FALSE);
+	// remove old custom items (keep standard system items)
+	int nCount = GetMenuItemCount(sysMenu);
+	while (nCount > 7) { // 7 = 6 default items + 1 final separator
+		RemoveMenu(sysMenu, nCount - 1, MF_BYPOSITION);
+		--nCount;
+	}
+	AppendMenuW(sysMenu, MF_SEPARATOR, 0, nullptr);
+	AppendMenuW(sysMenu, MF_STRING, IDM_SYS_ABOUT, S(L"Menu", L"sys_about"));
+
+	HMENU langMenu = CreatePopupMenu();
+	AppendMenuW(langMenu, MF_STRING | (g_lang == L"zh-CN" ? MF_CHECKED : 0), IDM_LANG_ZHCN, L"中文 (简体)");
+	AppendMenuW(langMenu, MF_STRING | (g_lang == L"en-US" ? MF_CHECKED : 0), IDM_LANG_ENUS, L"English");
+	AppendMenuW(sysMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(langMenu), S(L"Menu", L"sys_language"));
+
+	if (!g_created) {
+		RefreshDevices();
+		SetTimer(hwnd, TIMER_WATCH, 2000, nullptr);
+		g_created = true;
+	} else {
+		FillDeviceCombo(g_combo, g_renderIds, eRender, false);
+		FillDeviceCombo(g_comboMic, g_micIds, eCapture, true);
+		if (g_recording) {
+			SetWindowTextW(g_btnStart, S(L"UI", L"btn_stop"));
+			EnableWindow(g_combo, FALSE);
+			EnableWindow(g_comboMic, FALSE);
+		}
+		SetTimer(hwnd, TIMER_WATCH, 2000, nullptr);
+	}
+}
 
 // ---- 系统托盘 ----
 
@@ -81,9 +308,9 @@ void MinimizeToTray()
 	nid.hIcon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
 						  GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
 						  LR_SHARED));
-	std::wstring tip = L"桌面音频录制";
+	std::wstring tip = S(L"UI", L"app_title");
 	if (g_recording)
-		tip += L"（录制中）";
+		tip += std::wstring(L" (") + S(L"Status", L"recording") + L")";
 	wcsncpy_s(nid.szTip, tip.c_str(), _TRUNCATE);
 	Shell_NotifyIconW(NIM_ADD, &nid);
 
@@ -115,18 +342,51 @@ void RestoreFromTray()
 void ShowTrayMenu()
 {
 	HMENU menu = CreatePopupMenu();
-	AppendMenuW(menu, MF_STRING, IDM_TRAY_OPEN, L"打开");
-	AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, L"退出");
+	AppendMenuW(menu, MF_STRING, IDM_TRAY_OPEN, S(L"Menu", L"tray_open"));
+	AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, S(L"Menu", L"tray_exit"));
 	POINT pt;
 	GetCursorPos(&pt);
-	SetForegroundWindow(g_hwnd); // 保证菜单点击别处能自动关闭
+	SetForegroundWindow(g_hwnd);
 	TrackPopupMenu(menu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, g_hwnd, nullptr);
 	DestroyMenu(menu);
+}
+
+std::wstring Timestamp()
+{
+	SYSTEMTIME st{};
+	GetLocalTime(&st);
+	wchar_t buf[32];
+	swprintf_s(buf, L"[%04d-%02d-%02d %02d:%02d:%02d]", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+	return buf;
 }
 
 void SetStatus(const std::wstring &text)
 {
 	SetWindowTextW(g_status, text.c_str());
+}
+
+void AppendLog(const std::wstring &line)
+{
+	wchar_t exePath[MAX_PATH]{};
+	GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+	SYSTEMTIME st{};
+	GetLocalTime(&st);
+	wchar_t logName[128];
+	swprintf_s(logName, L"%s-%04d%02d.log", std::filesystem::path(exePath).stem().c_str(), st.wYear, st.wMonth);
+	auto logPath = std::filesystem::path(exePath).parent_path() / logName;
+
+	bool needBom = !std::filesystem::exists(logPath) || std::filesystem::file_size(logPath) == 0;
+	std::string utf8 = WToUtf8(Timestamp() + L" " + line + L"\n");
+	FILE *f = nullptr;
+	_wfopen_s(&f, logPath.c_str(), needBom ? L"wb" : L"ab");
+	if (f) {
+		if (needBom) {
+			unsigned char bom[] = { 0xEF, 0xBB, 0xBF };
+			fwrite(bom, 1, 3, f);
+		}
+		fwrite(utf8.c_str(), 1, utf8.size(), f);
+		fclose(f);
+	}
 }
 
 std::wstring FormatDuration(ULONGLONG ms)
@@ -142,15 +402,15 @@ std::wstring FormatDuration(ULONGLONG ms)
 
 void ShowRecordingStatus()
 {
-	std::wstring text = L"录制中  已录 " + FormatDuration(GetTickCount64() - g_startTick);
-	text += L"\r\n播放设备: " + g_deviceName;
-	text += L"\r\n麦克风: " + g_micName;
-	text += L"\r\n文件: " + g_outPath;
+	std::wstring text = std::wstring(S(L"Status", L"start")) + L": " + g_startTime + L"\r\n" + S(L"Status", L"recording") + L"  " + S(L"Status", L"duration") + L" " + FormatDuration(GetTickCount64() - g_startTick);
+	text += L"\r\n" + std::wstring(S(L"UI", L"label_playback")) + L" " + g_deviceName;
+	text += L"\r\n" + std::wstring(S(L"UI", L"label_mic")) + L" " + g_micName;
+	text += L"\r\n" + std::wstring(S(L"Status", L"file")) + L": " + g_outPath;
 	SetStatus(text);
 }
 
 // 枚举音频端点填充下拉框；flow=eRender 播放设备，eCapture 录音设备
-// addNone 时在索引 0 插入“（不录制）”项
+// addNone 时在索引 0 插入"（不录制）"项
 void FillDeviceCombo(HWND combo, std::vector<std::wstring> &ids, EDataFlow flow, bool addNone)
 {
 	ComboBox_ResetContent(combo);
@@ -158,7 +418,7 @@ void FillDeviceCombo(HWND combo, std::vector<std::wstring> &ids, EDataFlow flow,
 
 	int base = 0;
 	if (addNone) {
-		ComboBox_AddString(combo, L"（不录制）");
+		ComboBox_AddString(combo, S(L"UI", L"mic_none"));
 		base = 1;
 	}
 
@@ -166,7 +426,7 @@ void FillDeviceCombo(HWND combo, std::vector<std::wstring> &ids, EDataFlow flow,
 	HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
 				      __uuidof(IMMDeviceEnumerator), reinterpret_cast<void **>(&enumerator));
 	if (FAILED(hr)) {
-		SetStatus(L"初始化设备枚举器失败。");
+		SetStatus(L"Init failed");
 		if (addNone)
 			ComboBox_SetCurSel(combo, 0);
 		return;
@@ -208,7 +468,7 @@ void FillDeviceCombo(HWND combo, std::vector<std::wstring> &ids, EDataFlow flow,
 				store->Release();
 			}
 
-			const int idx = ComboBox_AddString(combo, name.empty() ? L"(未知设备)" : name.c_str());
+			const int idx = ComboBox_AddString(combo, name.empty() ? L"(?)" : name.c_str());
 			ids.emplace_back(id ? id : L"");
 			if (id && defaultId == id)
 				selectIdx = idx;
@@ -222,10 +482,9 @@ void FillDeviceCombo(HWND combo, std::vector<std::wstring> &ids, EDataFlow flow,
 	enumerator->Release();
 
 	if (ids.empty() && !addNone) {
-		// 播放设备一个都没有就没法录了
-		SetStatus(flow == eRender ? L"未找到可用的播放设备。" : L"");
+		SetStatus(flow == eRender ? S(L"Status", L"error_no_playback") : L"");
 	} else if (selectIdx < 0) {
-		selectIdx = base; // 无默认设备时选第一个
+		selectIdx = base;
 	}
 	ComboBox_SetCurSel(combo, selectIdx);
 }
@@ -258,14 +517,14 @@ bool StartRecording(bool fromAuto)
 		if (fromAuto)
 			SetStatus(msg);
 		else
-			MessageBoxW(g_hwnd, msg.c_str(), L"错误", MB_ICONERROR);
+			MessageBoxW(g_hwnd, msg.c_str(), S(L"About", L"title"), MB_ICONERROR);
 		return false;
 	};
 
 	const int sel = ComboBox_GetCurSel(g_combo);
 	if (sel < 0 || static_cast<size_t>(sel) >= g_renderIds.size()) {
 		if (!fromAuto)
-			MessageBoxW(g_hwnd, L"请先选择一个播放设备。", L"提示", MB_ICONINFORMATION);
+			MessageBoxW(g_hwnd, S(L"Status", L"error_no_device"), S(L"UI", L"app_title"), MB_ICONINFORMATION);
 		return false;
 	}
 	const int micSel = ComboBox_GetCurSel(g_comboMic); // 0 = 不录制
@@ -273,14 +532,14 @@ bool StartRecording(bool fromAuto)
 	wchar_t nameBuf[256]{};
 	GetWindowTextW(g_combo, nameBuf, 256);
 	g_deviceName = nameBuf;
-	g_micName = L"（不录制）";
+	g_micName = S(L"UI", L"mic_none");
 
 	std::wstring err;
 
 	// 1) 桌面 loopback 采集
 	auto capture = std::make_unique<WasapiCapture>();
 	if (!capture->Start(g_renderIds[sel], true, err))
-		return fail(L"启动播放设备采集失败：\r\n" + err);
+		return fail(std::wstring(S(L"Status", L"error_capture")) + L"\r\n" + err);
 
 	// 2) 麦克风采集（可选）
 	std::unique_ptr<WasapiCapture> micCap;
@@ -288,7 +547,7 @@ bool StartRecording(bool fromAuto)
 		micCap = std::make_unique<WasapiCapture>();
 		if (!micCap->Start(g_micIds[micSel - 1], false, err)) {
 			capture->Stop();
-			return fail(L"启动麦克风采集失败：\r\n" + err + L"\r\n（可在麦克风下拉框选「不录制」）");
+			return fail(std::wstring(S(L"Status", L"error_mic")) + L"\r\n" + err + L"\r\n（" + S(L"Status", L"error_mic_hint") + L"）");
 		}
 		GetWindowTextW(g_comboMic, nameBuf, 256);
 		g_micName = nameBuf;
@@ -302,7 +561,7 @@ bool StartRecording(bool fromAuto)
 		if (micCap)
 			micCap->Stop();
 		capture->Stop();
-		return fail(L"创建 MP3 编码器失败：\r\n" + err + L"\r\n（Windows N 版本需安装 Media Feature Pack）");
+		return fail(std::wstring(S(L"Status", L"error_mp3")) + L"\r\n" + err + L"\r\n（" + S(L"Status", L"error_mp3_hint") + L"）");
 	}
 
 	Mp3Writer *w = writer.get();
@@ -327,9 +586,11 @@ bool StartRecording(bool fromAuto)
 	g_writer = std::move(writer);
 	g_recording = true;
 	g_startTick = GetTickCount64();
+	g_startTime = Timestamp();
+	AppendLog(L"Start  device: " + g_deviceName + L"  mic: " + g_micName + L"  file: " + g_outPath);
 	SetTimer(g_hwnd, TIMER_ID, 500, nullptr);
 
-	SetWindowTextW(g_btnStart, L"停止录制");
+	SetWindowTextW(g_btnStart, S(L"UI", L"btn_stop"));
 	EnableWindow(g_combo, FALSE);
 	EnableWindow(g_comboMic, FALSE);
 	EnableWindow(g_chkAec, FALSE);
@@ -352,11 +613,12 @@ void StopRecording()
 	g_writer->Close();
 	SetCursor(old);
 
+	std::wstring endTime = Timestamp();
 	std::wstring status;
 	if (g_writer->HasError()) {
-		status = L"录制中断：" + g_writer->Error();
+		status = std::wstring(S(L"Status", L"start")) + L": " + g_startTime + L"\r\n" + S(L"Status", L"end") + L": " + endTime + L"\r\n" + S(L"Status", L"interrupted") + L"：" + g_writer->Error();
 		if (std::filesystem::exists(g_outPath))
-			status += L"\r\n文件: " + g_outPath;
+			status += L"\r\n" + std::wstring(S(L"Status", L"file")) + L": " + g_outPath;
 	} else {
 		std::wstring size = L"?";
 		std::error_code ec;
@@ -366,10 +628,14 @@ void StopRecording()
 			swprintf_s(b, L"%.1f MB", bytes / 1048576.0);
 			size = b;
 		}
-		status = L"录制完成  时长 " + FormatDuration(GetTickCount64() - g_startTick) + L"  大小 " + size +
-			 L"\r\n文件: " + g_outPath;
+		status = std::wstring(S(L"Status", L"start")) + L": " + g_startTime + L"\r\n" + S(L"Status", L"end") + L": " + endTime + L"\r\n" +
+			 S(L"Status", L"completed") + L"  " + S(L"Status", L"duration") + L" " +
+			 FormatDuration(GetTickCount64() - g_startTick) + L"  " + S(L"Status", L"size") + L" " + size + L"\r\n" + S(L"Status", L"file") + L": " + g_outPath;
 	}
 	SetStatus(status);
+	AppendLog(g_writer->HasError()
+		  ? std::wstring(L"interrupted: ") + g_writer->Error() + L"  file: " + g_outPath
+		  : std::wstring(L"completed  duration ") + FormatDuration(GetTickCount64() - g_startTick) + L"  file: " + g_outPath);
 
 	// 用户手动停止了自动开始的录制 → 本次会议内抑制自动重开
 	if (g_autoStarted) {
@@ -382,7 +648,12 @@ void StopRecording()
 	g_capture.reset();
 	g_mixer.reset();
 	g_writer.reset();
-	SetWindowTextW(g_btnStart, L"开始录制");
+	++g_recordCount;
+	wchar_t countBuf[32];
+	swprintf_s(countBuf, L"%s: %d", S(L"UI", L"record_count"), g_recordCount);
+	SetWindowTextW(g_recordCountText, countBuf);
+
+	SetWindowTextW(g_btnStart, S(L"UI", L"btn_start"));
 	EnableWindow(g_combo, TRUE);
 	EnableWindow(g_comboMic, TRUE);
 	EnableWindow(g_chkAec, TRUE);
@@ -408,9 +679,10 @@ void OnWatchTick()
 		g_autoSuppress = false;
 		if (g_recording && g_autoStarted) {
 			if (++g_inactivePolls >= WATCH_GRACE_POLLS) {
+				AppendLog(L"Teams meeting ended, auto stop  file: " + g_outPath);
 				StopRecording();
 				g_inactivePolls = 0;
-				SetStatus(L"Teams 会议已结束，录制自动停止。\r\n文件: " + g_outPath);
+				SetStatus(std::wstring(S(L"Status", L"start")) + L": " + g_startTime + L"\r\n" + S(L"Status", L"end") + L": " + Timestamp() + L"\r\n" + S(L"Status", L"teams_stopped") + L"\r\n" + S(L"Status", L"file") + L": " + g_outPath);
 			}
 		} else {
 			g_inactivePolls = 0;
@@ -423,39 +695,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	switch (msg) {
 	case WM_CREATE: {
 		g_hwnd = hwnd;
-		HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-		auto make = [&](const wchar_t *cls, const wchar_t *text, DWORD style, int x, int y, int w, int h,
-				int id) {
-			HWND c = CreateWindowExW(0, cls, text, style | WS_CHILD | WS_VISIBLE, x, y, w, h, hwnd,
-						 reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr, nullptr);
-			SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-			return c;
-		};
-
-		make(L"STATIC", L"播放设备:", SS_LEFT, 12, 16, 64, 18, -1);
-		g_combo = make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 80, 12, 352, 300, IDC_COMBO_DEVICE);
-		g_btnRefresh = make(L"BUTTON", L"刷新", 0, 440, 11, 68, 25, IDC_BTN_REFRESH);
-		make(L"STATIC", L"麦克风:", SS_LEFT, 12, 50, 64, 18, -1);
-		g_comboMic = make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 80, 46, 352, 300, IDC_COMBO_MIC);
-		g_btnStart = make(L"BUTTON", L"开始录制", 0, 12, 84, 130, 30, IDC_BTN_START);
-		g_chkAec = make(L"BUTTON", L"回声消除 (AEC)", BS_AUTOCHECKBOX, 156, 88, 120, 22, IDC_CHK_AEC);
-		Button_SetCheck(g_chkAec, BST_CHECKED);
-		g_chkAutoTeams = make(L"BUTTON", L"Teams 会议自动录制", BS_AUTOCHECKBOX, 288, 88, 160, 22,
-				      IDC_CHK_AUTOTEAMS);
-
-		g_status = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-					   WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
-						   WS_VSCROLL,
-					   12, 124, 496, 114, hwnd,
-					   reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_STATUS)),
-					   nullptr, nullptr);
-		SendMessageW(g_status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-
-		SetStatus(L"就绪。\r\n录制「播放设备」输出的声音（会议中对方的声音）并可同时混入「麦克风」"
-			  L"（自己的声音），MP3 保存到程序所在目录。\r\n"
-			  L"勾选「Teams 会议自动录制」后，检测到会议开始/结束会自动开始/停止录制。");
-		RefreshDevices();
-		SetTimer(hwnd, TIMER_WATCH, 2000, nullptr); // Teams 看门狗
+		g_created = false;
+		RecreateControls(hwnd);
 		return 0;
 	}
 
@@ -467,17 +708,27 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		case IDC_BTN_REFRESH:
 			if (!g_recording) {
 				RefreshDevices();
-				SetStatus(L"设备列表已刷新。");
+				SetStatus(S(L"Status", L"devices_refreshed"));
 			}
 			return 0;
 		case IDC_CHK_AUTOTEAMS:
 			if (Button_GetCheck(g_chkAutoTeams) == BST_CHECKED) {
 				g_autoSuppress = false;
 				g_inactivePolls = 0;
+				AppendLog(L"Teams monitor ON");
 				if (!g_recording)
-					SetStatus(L"自动录制已开启：等待 Teams 会议开始…");
+					SetStatus(S(L"Status", L"auto_teams_on"));
+			} else {
+				AppendLog(L"Teams monitor OFF");
 			}
 			return 0;
+		case IDC_BTN_OPENFOLDER: {
+			wchar_t exePath[MAX_PATH]{};
+			GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+			std::filesystem::path dir = std::filesystem::path(exePath).parent_path();
+			ShellExecuteW(hwnd, L"open", dir.c_str(), nullptr, nullptr, SW_SHOW);
+			return 0;
+		}
 		case IDM_TRAY_OPEN:
 			RestoreFromTray();
 			return 0;
@@ -487,12 +738,34 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		}
 		break;
 
-	case WM_SYSCOMMAND:
-		if ((wp & 0xFFF0) == SC_MINIMIZE) {
+	case WM_SYSCOMMAND: {
+		// SC_MINIMIZE needs 0xFFF0 mask; custom menu items use raw LOWORD
+		const UINT cmd = wp & 0xFFF0;
+		if (cmd == SC_MINIMIZE) {
 			MinimizeToTray();
 			return 0;
 		}
+		const UINT id = LOWORD(wp);
+		if (id == IDM_SYS_ABOUT) {
+			std::wstring about = std::wstring(S(L"About", L"line1")) + L"\r\n\r\n" +
+					    S(L"About", L"line2") + L"\r\n" +
+					    S(L"About", L"line3") + L"\r\n\r\n" +
+					    S(L"About", L"line4") + L"\r\n" +
+					    S(L"About", L"line5") + L"\r\n" +
+					    S(L"About", L"line6") + L"\r\n" +
+					    S(L"About", L"line7");
+			MessageBoxW(hwnd, about.c_str(), S(L"About", L"title"), MB_OK | MB_ICONINFORMATION);
+			return 0;
+		}
+		if (id == IDM_LANG_ZHCN || id == IDM_LANG_ENUS) {
+			g_lang = (id == IDM_LANG_ZHCN) ? L"zh-CN" : L"en-US";
+			SaveConfig();
+			LoadLangFile(g_lang);
+			ReloadUI();
+			return 0;
+		}
 		break;
+	}
 
 	case WM_TRAYICON:
 		if (lp == WM_LBUTTONUP || lp == WM_LBUTTONDBLCLK)
@@ -512,8 +785,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		std::unique_ptr<std::wstring> m(reinterpret_cast<std::wstring *>(lp));
 		if (g_recording)
 			StopRecording();
-		MessageBoxW(hwnd, m->c_str(), L"录制错误", MB_ICONERROR);
-		SetStatus(L"录制中断：" + *m);
+		MessageBoxW(hwnd, m->c_str(), S(L"About", L"title"), MB_ICONERROR);
+		SetStatus(std::wstring(S(L"Status", L"start")) + L": " + g_startTime + L"\r\n" + S(L"Status", L"end") + L": " + Timestamp() + L"\r\n" + S(L"Status", L"interrupted") + L"：" + *m);
 		return 0;
 	}
 
@@ -539,6 +812,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd)
 	INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES};
 	InitCommonControlsEx(&icc);
 
+	LoadConfig();
+
 	WNDCLASSEXW wc{sizeof(wc)};
 	wc.lpfnWndProc = WndProc;
 	wc.hInstance = instance;
@@ -552,9 +827,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd)
 						   LR_SHARED));
 	RegisterClassExW(&wc);
 
-	RECT rc{0, 0, 520, 250};
+	RECT rc{0, 0, 520, 280};
 	AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
-	HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"桌面音频录制 (Desktop Audio Recorder)",
+	HWND hwnd = CreateWindowExW(0, wc.lpszClassName, S(L"UI", L"app_title"),
 				    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT,
 				    CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr,
 				    instance, nullptr);

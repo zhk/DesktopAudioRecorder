@@ -137,6 +137,8 @@ pub const PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000;
 pub const CW_USEDEFAULT: i32 = 0x8000_0000u32 as i32;
 
 pub const SW_HIDE: i32 = 0;
+pub const GW_HWNDNEXT: UINT = 2;
+pub const GW_CHILD: UINT = 5;
 pub const SW_SHOW: i32 = 5;
 pub const SW_RESTORE: i32 = 9;
 /// 使用 STARTUPINFO 里指定的显示方式（等价于 `wWinMain` 收到的 `nCmdShow`）。
@@ -220,6 +222,10 @@ pub const MB_ICONINFORMATION: UINT = 0x0000_0040;
 
 // 菜单
 pub const MF_STRING: UINT = 0x0000_0000;
+pub const MF_POPUP: UINT = 0x0000_0010;
+pub const MF_SEPARATOR: UINT = 0x0000_0800;
+pub const MF_CHECKED: UINT = 0x0000_0008;
+pub const MF_BYPOSITION: UINT = 0x0000_0400;
 pub const TPM_LEFTALIGN: UINT = 0x0000;
 pub const TPM_BOTTOMALIGN: UINT = 0x0020;
 /// 让 `TrackPopupMenu` 直接返回菜单项 ID 而不发送 `WM_COMMAND`。
@@ -266,6 +272,11 @@ unsafe extern "system" {
         lpExeName: LPWSTR,
         lpdwSize: *mut DWORD,
     ) -> BOOL;
+
+    pub fn GetPrivateProfileSectionW(lpAppName: LPCWSTR, lpReturnedString: LPWSTR, nSize: DWORD, lpFileName: LPCWSTR) -> DWORD;
+    pub fn GetPrivateProfileStringW(lpAppName: LPCWSTR, lpKeyName: LPCWSTR, lpDefault: LPCWSTR, lpReturnedString: LPWSTR, nSize: DWORD, lpFileName: LPCWSTR) -> DWORD;
+    pub fn WritePrivateProfileStringW(lpAppName: LPCWSTR, lpKeyName: LPCWSTR, lpString: LPCWSTR, lpFileName: LPCWSTR) -> BOOL;
+    pub fn GetUserDefaultUILanguage() -> u16;
 }
 
 #[link(name = "user32")]
@@ -300,6 +311,7 @@ unsafe extern "system" {
 
     pub fn SetWindowTextW(hWnd: HWND, lpString: LPCWSTR) -> BOOL;
     pub fn GetWindowTextW(hWnd: HWND, lpString: LPWSTR, nMaxCount: i32) -> i32;
+    pub fn GetWindow(hWnd: HWND, uCmd: UINT) -> HWND;
     pub fn EnableWindow(hWnd: HWND, bEnable: BOOL) -> BOOL;
 
     pub fn SetTimer(hWnd: HWND, nIDEvent: UINT_PTR, uElapse: UINT, lpTimerFunc: LPVOID)
@@ -338,6 +350,10 @@ unsafe extern "system" {
     pub fn DestroyMenu(hMenu: HMENU) -> BOOL;
 
     pub fn AdjustWindowRect(lpRect: *mut RECT, dwStyle: DWORD, bMenu: BOOL) -> BOOL;
+    pub fn GetSystemMenu(hWnd: HWND, bRevert: BOOL) -> HMENU;
+    pub fn RemoveMenu(hMenu: HMENU, uPosition: UINT, uFlags: UINT) -> BOOL;
+    pub fn GetMenuItemCount(hMenu: HMENU) -> i32;
+    pub fn EnumChildWindows(hWndParent: HWND, lpEnumFunc: Option<unsafe extern "system" fn(HWND, LPARAM) -> BOOL>, lParam: LPARAM) -> BOOL;
 }
 
 #[link(name = "gdi32")]
@@ -354,6 +370,14 @@ unsafe extern "system" {
 #[link(name = "shell32")]
 unsafe extern "system" {
     pub fn Shell_NotifyIconW(dwMessage: DWORD, lpData: *mut NOTIFYICONDATAW) -> BOOL;
+    pub fn ShellExecuteW(
+        hwnd: HWND,
+        lpOperation: LPCWSTR,
+        lpFile: LPCWSTR,
+        lpParameters: LPCWSTR,
+        lpDirectory: LPCWSTR,
+        nShowCmd: i32,
+    ) -> HINSTANCE;
 }
 
 #[link(name = "ole32")]

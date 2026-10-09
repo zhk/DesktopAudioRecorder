@@ -12,9 +12,10 @@
 //! 它再发一趟 `WM_COMMAND`）。
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use core::ptr::{null, null_mut};
 
@@ -22,21 +23,24 @@ use crate::audio_mixer::AudioMixer;
 use crate::ffi::system::{
     AdjustWindowRect, AppendMenuW, CoCreateInstance, CoTaskMemFree, ComApartment, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, EnableWindow,
-    GetCursorPos, GetLocalTime, GetMessageW, GetModuleFileNameW, GetModuleHandleW, GetStockObject,
-    GetSystemMetrics, GetTickCount64, GetWindowTextW, InitCommonControlsEx, KillTimer, LoadCursorW,
-    LoadImageW, MessageBoxW, PostMessageW, PostQuitMessage, PropVariantClear, RegisterClassExW,
-    SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowTextW, Shell_NotifyIconW,
-    ShowWindow, TrackPopupMenu, TranslateMessage, UpdateWindow, BM_GETCHECK, BM_SETCHECK,
+GetCursorPos, GetLocalTime, GetMenuItemCount, GetMessageW, GetModuleFileNameW, GetModuleHandleW,
+GetPrivateProfileStringW, GetStockObject,
+GetSystemMenu, GetSystemMetrics, GetTickCount64, GetUserDefaultUILanguage, GetWindow, GetWindowTextW,
+    InitCommonControlsEx, KillTimer, LoadCursorW, LoadImageW, MessageBoxW, PostMessageW,
+    PostQuitMessage, PropVariantClear, RegisterClassExW, RemoveMenu, SendMessageW, SetCursor,
+    SetForegroundWindow, SetTimer, SetWindowTextW, Shell_NotifyIconW, ShowWindow, TrackPopupMenu,
+    TranslateMessage, UpdateWindow, WritePrivateProfileStringW, BM_GETCHECK, BM_SETCHECK,
     BS_AUTOCHECKBOX, BST_CHECKED, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL,
     CBS_DROPDOWNLIST, COLOR_BTNFACE, CW_USEDEFAULT, DEFAULT_GUI_FONT, ES_AUTOVSCROLL, ES_MULTILINE,
-    ES_READONLY, ICC_STANDARD_CLASSES, IDC_ARROW, IDC_WAIT, IMAGE_ICON, INITCOMMONCONTROLSEX,
-    LR_DEFAULTSIZE, LR_SHARED, MAX_PATH, MB_ICONERROR, MB_ICONINFORMATION, MF_STRING, MSG,
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, POINT, RECT, SC_MASK,
-    SC_MINIMIZE, SM_CXSMICON, SM_CYSMICON, SS_LEFT, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT,
-    SYSTEMTIME, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_CREATE, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_SETFONT, WM_SYSCOMMAND,
-    WM_TIMER, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_MINIMIZEBOX, WS_OVERLAPPED,
-    WS_SYSMENU, WS_VISIBLE, WS_VSCROLL,
+    ES_READONLY, ICC_STANDARD_CLASSES, IDC_ARROW, IDC_WAIT, IMAGE_ICON, INITCOMMONCONTROLSEX, GW_CHILD, GW_HWNDNEXT,
+    LR_DEFAULTSIZE, LR_SHARED, MAX_PATH, MB_OK, MB_ICONERROR, MB_ICONINFORMATION, MF_BYPOSITION,
+    MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
+    NIM_DELETE, NOTIFYICONDATAW, POINT, RECT, SC_MINIMIZE, SM_CXSMICON, SM_CYSMICON, SS_LEFT, SW_HIDE,
+    SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, ShellExecuteW, SW_SHOWNORMAL, SYSTEMTIME, TPM_BOTTOMALIGN,
+    TPM_LEFTALIGN, TPM_RETURNCMD, WM_APP, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_DESTROY,
+    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WM_SETFONT, WM_SYSCOMMAND, WM_TIMER, WNDCLASSEXW,
+    WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_VISIBLE,
+    WS_VSCROLL,
 };
 use crate::ffi::wasapi::{
     eCapture, eConsole, eRender, EDataFlow, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator,
@@ -44,9 +48,9 @@ use crate::ffi::wasapi::{
     STGM_READ,
 };
 use crate::ffi::{
-    failed, make_int_resource, succeeded, Com, ComPtr, DWORD, HBRUSH, HCURSOR, HICON, HMENU, HWND,
-    LPARAM, LPCWSTR, LPWSTR, LRESULT, PROPVARIANT, SendableHwnd, UINT, WPARAM, CLSCTX_ALL, FALSE,
-    TRUE, VT_LPWSTR,
+    failed, make_int_resource, succeeded, Com, ComPtr, DWORD, HBRUSH, HCURSOR, HICON,
+    HMENU, HWND, LPARAM, LPCWSTR, LPWSTR, LRESULT, PROPVARIANT, SendableHwnd, UINT, UINT_PTR,
+    WPARAM, CLSCTX_ALL, FALSE, TRUE, VT_LPWSTR,
 };
 use crate::mp3_writer::Mp3Writer;
 use crate::teams_watcher::TeamsWatcher;
@@ -62,6 +66,7 @@ const IDC_EDIT_STATUS: i32 = 1004;
 const IDC_COMBO_MIC: i32 = 1005;
 const IDC_CHK_AEC: i32 = 1006;
 const IDC_CHK_AUTOTEAMS: i32 = 1007;
+const IDC_BTN_OPENFOLDER: i32 = 1008;
 
 const TIMER_ID: usize = 1;
 const TIMER_WATCH: usize = 2;
@@ -70,6 +75,9 @@ const WM_TRAYICON: UINT = WM_APP + 2;
 const TRAY_UID: UINT = 1;
 const IDM_TRAY_OPEN: usize = 2001;
 const IDM_TRAY_EXIT: usize = 2002;
+const IDM_SYS_ABOUT: usize = 3001;
+const IDM_LANG_ZHCN: usize = 3002;
+const IDM_LANG_ENUS: usize = 3003;
 
 /// 192 kbps
 const BITRATE: u32 = 192_000;
@@ -77,6 +85,124 @@ const BITRATE: u32 = 192_000;
 const WATCH_GRACE_POLLS: u32 = 5;
 /// `resource.h` 里的 `IDI_APP`
 const IDI_APP: u16 = 101;
+
+static LOCALE: OnceLock<String> = OnceLock::new();
+static STRINGS: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+fn detect_system_locale() -> String {
+    let lang = unsafe { GetUserDefaultUILanguage() };
+    if lang & 0x3FF == 0x04 {
+        "zh-CN".to_string()
+    } else {
+        "en-US".to_string()
+    }
+}
+
+fn exe_dir() -> String {
+    let mut buf = [0u16; MAX_PATH];
+    unsafe {
+        let len = GetModuleFileNameW(null_mut(), buf.as_mut_ptr(), MAX_PATH as DWORD);
+        let exe = PathBuf::from(crate::util::from_wide(&buf[..len as usize]));
+        exe.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()
+    }
+}
+
+fn exe_name() -> String {
+    let mut buf = [0u16; MAX_PATH];
+    unsafe {
+        let len = GetModuleFileNameW(null_mut(), buf.as_mut_ptr(), MAX_PATH as DWORD);
+        let exe = PathBuf::from(crate::util::from_wide(&buf[..len as usize]));
+        exe.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+    }
+}
+
+fn load_lang_file(locale: &str) {
+    let dir = exe_dir();
+    let ini_path = format!("{}\\lang\\{}.ini", dir, locale);
+    let content = match std::fs::read(&ini_path) {
+        Ok(d) => {
+            // UTF-16LE decode (may have BOM)
+            if d.len() < 2 {
+                return;
+            }
+            let bom_offset = if d[0] == 0xFF && d[1] == 0xFE { 2 } else { 0 };
+            let u16_data = unsafe {
+                std::slice::from_raw_parts(d.as_ptr().add(bom_offset) as *const u16, (d.len() - bom_offset) / 2)
+            };
+            let mut s = String::with_capacity(u16_data.len());
+            for &c in u16_data {
+                if c != 0 {
+                    s.push(char::from_u32(c as u32).unwrap_or(char::REPLACEMENT_CHARACTER));
+                }
+            }
+            s
+        }
+        Err(_) => return,
+    };
+
+    let mut map = HashMap::new();
+    let mut sec_name = String::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            sec_name = line[1..line.len() - 1].to_string();
+        } else if !sec_name.is_empty() {
+            if let Some(eq) = line.find('=') {
+                let key = line[..eq].to_string();
+                let val = line[eq + 1..].replace("\\n", "\r\n");
+                map.insert(format!("{}.{}", sec_name, key), val);
+            }
+        }
+    }
+
+    let _ = STRINGS.set(map);
+}
+
+fn load_config() {
+    let dir = exe_dir();
+    let name = exe_name();
+    let ini_path = format!("{}\\{}.ini", dir, name);
+    let ini_wide = crate::util::to_wide(&ini_path);
+    let key_wide = crate::util::to_wide("locale");
+    let sec_wide = crate::util::to_wide("Language");
+    let default_wide = crate::util::to_wide("");
+    let mut buf = [0u16; 16];
+    unsafe {
+        GetPrivateProfileStringW(sec_wide.as_ptr(), key_wide.as_ptr(), default_wide.as_ptr(), buf.as_mut_ptr(), 16, ini_wide.as_ptr());
+    }
+    let locale = if buf[0] == 0 {
+        detect_system_locale()
+    } else {
+        crate::util::from_wide(&buf)
+    };
+    let _ = LOCALE.set(locale.clone());
+    load_lang_file(&locale);
+}
+
+fn save_config(locale: &str) {
+    let dir = exe_dir();
+    let name = exe_name();
+    let ini_path = format!("{}\\{}.ini", dir, name);
+    let ini_wide = crate::util::to_wide(&ini_path);
+    let sec_wide = crate::util::to_wide("Language");
+    let key_wide = crate::util::to_wide("locale");
+    let val_wide = crate::util::to_wide(locale);
+    unsafe {
+        WritePrivateProfileStringW(sec_wide.as_ptr(), key_wide.as_ptr(), val_wide.as_ptr(), ini_wide.as_ptr());
+    }
+}
+
+fn tr(section: &str, key: &str) -> &'static str {
+    let full_key = format!("{}.{}", section, key);
+    STRINGS.get()
+        .and_then(|m| m.get(&full_key))
+        .map(|s| s.as_str())
+        .unwrap_or("?")
+}
 
 thread_local! {
     /// UI 线程独占的应用状态（窗口过程只会在 UI 线程被调用）。
@@ -95,11 +221,11 @@ struct PendingMessage {
 
 impl PendingMessage {
     fn error(text: String) -> Self {
-        Self { text, title: "错误".to_string(), flags: MB_ICONERROR }
+        Self { text, title: tr("Status", "interrupted").to_string(), flags: MB_ICONERROR }
     }
 
     fn recording_error(text: String) -> Self {
-        Self { text, title: "录制错误".to_string(), flags: MB_ICONERROR }
+        Self { text, title: format!("{} {}", tr("Status", "recording"), tr("Status", "interrupted")), flags: MB_ICONERROR }
     }
 
     fn info(text: String, title: &str) -> Self {
@@ -158,6 +284,9 @@ struct App {
     combo_mic: HWND,
     btn_start: HWND,
     btn_refresh: HWND,
+    btn_open_folder: HWND,
+    record_count_text: HWND,
+    record_count: i32,
     status: HWND,
     chk_aec: HWND,
     chk_auto_teams: HWND,
@@ -176,6 +305,7 @@ struct App {
     /// 会议结束防抖计数
     inactive_polls: u32,
     start_tick: u64,
+    start_time: String,
     out_path: PathBuf,
     device_name: String,
     mic_name: String,
@@ -189,6 +319,9 @@ impl App {
             combo_mic: null_mut(),
             btn_start: null_mut(),
             btn_refresh: null_mut(),
+            btn_open_folder: null_mut(),
+            record_count_text: null_mut(),
+            record_count: 0,
             status: null_mut(),
             chk_aec: null_mut(),
             chk_auto_teams: null_mut(),
@@ -200,6 +333,7 @@ impl App {
             auto_suppress: false,
             inactive_polls: 0,
             start_tick: 0,
+            start_time: String::new(),
             out_path: PathBuf::new(),
             device_name: String::new(),
             mic_name: String::new(),
@@ -212,9 +346,8 @@ impl App {
         set_window_text(self.status, text);
     }
 
-    fn on_create(&mut self, hwnd: HWND) {
+    fn recreate_controls(&mut self, hwnd: HWND) {
         unsafe {
-            self.hwnd = hwnd;
             let font = GetStockObject(DEFAULT_GUI_FONT);
 
             let make = |class: &str, text: &str, style: DWORD, x: i32, y: i32, w: i32, h: i32, id: i32| -> HWND {
@@ -238,7 +371,7 @@ impl App {
                 control
             };
 
-            make("STATIC", "播放设备:", SS_LEFT, 12, 16, 64, 18, -1);
+            make("STATIC", tr("UI", "label_playback"), SS_LEFT, 12, 16, 64, 18, -1);
             self.combo = make(
                 "COMBOBOX",
                 "",
@@ -249,8 +382,8 @@ impl App {
                 300,
                 IDC_COMBO_DEVICE,
             );
-            self.btn_refresh = make("BUTTON", "刷新", 0, 440, 11, 68, 25, IDC_BTN_REFRESH);
-            make("STATIC", "麦克风:", SS_LEFT, 12, 50, 64, 18, -1);
+            self.btn_refresh = make("BUTTON", tr("UI", "btn_refresh"), 0, 440, 11, 68, 25, IDC_BTN_REFRESH);
+            make("STATIC", tr("UI", "label_mic"), SS_LEFT, 12, 50, 64, 18, -1);
             self.combo_mic = make(
                 "COMBOBOX",
                 "",
@@ -261,23 +394,30 @@ impl App {
                 300,
                 IDC_COMBO_MIC,
             );
-            self.btn_start = make("BUTTON", "开始录制", 0, 12, 84, 130, 30, IDC_BTN_START);
+            if self.session.is_some() {
+                self.btn_start = make("BUTTON", tr("UI", "btn_stop"), 0, 12, 84, 130, 30, IDC_BTN_START);
+            } else {
+                self.btn_start = make("BUTTON", tr("UI", "btn_start"), 0, 12, 84, 130, 30, IDC_BTN_START);
+            }
+            self.btn_open_folder = make("BUTTON", tr("UI", "btn_open_folder"), 0, 12, 118, 100, 25, IDC_BTN_OPENFOLDER);
+            let count_text = format!("{}: {}", tr("UI", "record_count"), self.record_count);
+            self.record_count_text = make("STATIC", &count_text, SS_LEFT, 116, 122, 70, 18, -1);
             self.chk_aec = make(
                 "BUTTON",
-                "回声消除 (AEC)",
+                tr("UI", "chk_aec"),
                 BS_AUTOCHECKBOX,
                 156,
                 88,
-                120,
+                160,
                 22,
                 IDC_CHK_AEC,
             );
             button_set_check(self.chk_aec, true);
             self.chk_auto_teams = make(
                 "BUTTON",
-                "Teams 会议自动录制",
+                tr("UI", "chk_auto_teams"),
                 BS_AUTOCHECKBOX,
-                288,
+                316,
                 88,
                 160,
                 22,
@@ -292,9 +432,9 @@ impl App {
                 empty.as_ptr(),
                 WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
                 12,
-                124,
+                152,
                 496,
-                114,
+                86,
                 hwnd,
                 IDC_EDIT_STATUS as usize as HMENU,
                 null_mut(),
@@ -302,13 +442,42 @@ impl App {
             );
             SendMessageW(self.status, WM_SETFONT, font as WPARAM, TRUE as LPARAM);
 
-            self.set_status(
-                "就绪。\r\n录制「播放设备」输出的声音（会议中对方的声音）并可同时混入「麦克风」\
-                 （自己的声音），MP3 保存到程序所在目录。\r\n\
-                 勾选「Teams 会议自动录制」后，检测到会议开始/结束会自动开始/停止录制。",
-            );
+            self.set_status(&format!(
+                "{}\r\n{}\r\n{}",
+                tr("Status", "ready"),
+                tr("Status", "initial_help"),
+                tr("Status", "legal_warning")
+            ));
+
+            // System menu
+            let sys_menu = GetSystemMenu(hwnd, FALSE);
+            let mut n_count = GetMenuItemCount(sys_menu);
+            while n_count > 7 {
+                RemoveMenu(sys_menu, (n_count - 1) as UINT, MF_BYPOSITION);
+                n_count -= 1;
+            }
+            AppendMenuW(sys_menu, MF_SEPARATOR, 0, null_mut());
+            let about_text = to_wide(tr("Menu", "sys_about"));
+            AppendMenuW(sys_menu, MF_STRING, IDM_SYS_ABOUT as UINT_PTR, about_text.as_ptr());
+
+            let lang_menu = CreatePopupMenu();
+            let locale = LOCALE.get().map(|s| s.as_str()).unwrap_or("en-US");
+            let zh_text = to_wide("中文 (简体)");
+            let en_text = to_wide("English");
+            let zh_flags = MF_STRING | if locale == "zh-CN" { MF_CHECKED } else { 0 };
+            let en_flags = MF_STRING | if locale == "en-US" { MF_CHECKED } else { 0 };
+            AppendMenuW(lang_menu, zh_flags, IDM_LANG_ZHCN as UINT_PTR, zh_text.as_ptr());
+            AppendMenuW(lang_menu, en_flags, IDM_LANG_ENUS as UINT_PTR, en_text.as_ptr());
+            let lang_label = to_wide(tr("Menu", "sys_language"));
+            AppendMenuW(sys_menu, MF_POPUP, lang_menu as UINT_PTR, lang_label.as_ptr());
+        }
+    }
+
+    fn on_create(&mut self, hwnd: HWND) {
+        unsafe {
+            self.hwnd = hwnd;
+            self.recreate_controls(hwnd);
             self.refresh_devices();
-            // Teams 看门狗
             SetTimer(hwnd, TIMER_WATCH, 2000, null_mut());
         }
     }
@@ -333,9 +502,12 @@ impl App {
         if button_checked(self.chk_auto_teams) {
             self.auto_suppress = false;
             self.inactive_polls = 0;
+            append_log("Teams monitor ON");
             if self.session.is_none() {
-                self.set_status("自动录制已开启：等待 Teams 会议开始…");
+                self.set_status(tr("Status", "auto_teams_on"));
             }
+        } else {
+            append_log("Teams monitor OFF");
         }
     }
 
@@ -344,10 +516,17 @@ impl App {
     fn show_recording_status(&mut self) {
         let elapsed = unsafe { GetTickCount64() } - self.start_tick;
         let text = format!(
-            "录制中  已录 {}\r\n播放设备: {}\r\n麦克风: {}\r\n文件: {}",
+            "{}: {}\r\n{}  {} {}\r\n{}: {}\r\n{}: {}\r\n{}: {}",
+            tr("Status", "start"),
+            self.start_time,
+            tr("Status", "recording"),
+            tr("Status", "duration"),
             format_duration(elapsed),
+            tr("UI", "label_playback"),
             self.device_name,
+            tr("UI", "label_mic"),
             self.mic_name,
+            tr("Status", "file"),
             self.out_path.display()
         );
         self.set_status(&text);
@@ -370,13 +549,13 @@ impl App {
 
     fn start_recording(&mut self, from_auto: bool) -> StartOutcome {
         let sel = combo_cur_sel(self.combo);
-        if sel < 0 || sel as usize >= self.render_ids.len() {
+if sel < 0 || sel as usize >= self.render_ids.len() {
             return StartOutcome {
                 started: false,
                 message: if from_auto {
                     None
                 } else {
-                    Some(PendingMessage::info("请先选择一个播放设备。".to_string(), "提示"))
+                    Some(PendingMessage::info(tr("Status", "error_no_device").to_string(), tr("About", "title")))
                 },
             };
         }
@@ -384,13 +563,13 @@ impl App {
         let mic_sel = combo_cur_sel(self.combo_mic);
 
         self.device_name = combo_text(self.combo);
-        self.mic_name = "（不录制）".to_string();
+        self.mic_name = tr("UI", "mic_none").to_string();
 
         // 1) 桌面 loopback 采集
         let device_id = self.render_ids[sel as usize].clone();
         let mut desktop = WasapiCapture::new();
         if let Err(e) = desktop.start(Some(&device_id), true) {
-            return self.start_failure(from_auto, format!("启动播放设备采集失败：\r\n{e}"));
+            return self.start_failure(from_auto, format!("{}\r\n{e}", tr("Status", "error_capture")));
         }
 
         // 2) 麦克风采集（可选）
@@ -402,7 +581,7 @@ impl App {
                 desktop.stop();
                 return self.start_failure(
                     from_auto,
-                    format!("启动麦克风采集失败：\r\n{e}\r\n（可在麦克风下拉框选「不录制」）"),
+                    format!("{}\r\n{e}\r\n{}", tr("Status", "error_mic"), tr("Status", "error_mic_hint")),
                 );
             }
             self.mic_name = combo_text(self.combo_mic);
@@ -423,9 +602,7 @@ impl App {
                 desktop.stop();
                 return self.start_failure(
                     from_auto,
-                    format!(
-                        "创建 MP3 编码器失败：\r\n{e}\r\n（Windows N 版本需安装 Media Feature Pack）"
-                    ),
+                    format!("{}\r\n{e}\r\n{}", tr("Status", "error_mp3"), tr("Status", "error_mp3_hint")),
                 );
             }
         };
@@ -464,9 +641,11 @@ impl App {
 
         self.session = Some(Session { desktop, mic, mixer, writer });
         self.start_tick = unsafe { GetTickCount64() };
+        self.start_time = timestamp();
+        append_log(&format!("Start  device: {}  mic: {}  file: {}", self.device_name, self.mic_name, self.out_path.display()));
         unsafe { SetTimer(self.hwnd, TIMER_ID, 500, null_mut()) };
 
-        set_window_text(self.btn_start, "停止录制");
+        set_window_text(self.btn_start, tr("UI", "btn_stop"));
         unsafe {
             EnableWindow(self.combo, FALSE);
             EnableWindow(self.combo_mic, FALSE);
@@ -488,25 +667,45 @@ impl App {
         let (has_error, error) = session.stop();
         unsafe { SetCursor(old_cursor) };
 
+        let end_time = timestamp();
         let status = if has_error {
-            let mut text = format!("录制中断：{error}");
-            if self.out_path.exists() {
-                text.push_str(&format!("\r\n文件: {}", self.out_path.display()));
-            }
-            text
+            format!(
+                "{}: {}\r\n{}: {}\r\n{}：{error}\r\n{}: {}",
+                tr("Status", "start"),
+                self.start_time,
+                tr("Status", "end"),
+                end_time,
+                tr("Status", "interrupted"),
+                tr("Status", "file"),
+                self.out_path.display()
+            )
         } else {
             let size = std::fs::metadata(&self.out_path)
                 .map(|m| format!("{:.1} MB", m.len() as f64 / 1_048_576.0))
                 .unwrap_or_else(|_| "?".to_string());
             let elapsed = unsafe { GetTickCount64() } - self.start_tick;
             format!(
-                "录制完成  时长 {}  大小 {}\r\n文件: {}",
+                "{}: {}\r\n{}: {}\r\n{}  {}  {}  {}\r\n{}: {}",
+                tr("Status", "start"),
+                self.start_time,
+                tr("Status", "end"),
+                end_time,
+                tr("Status", "completed"),
                 format_duration(elapsed),
+                tr("Status", "size"),
                 size,
+                tr("Status", "file"),
                 self.out_path.display()
             )
         };
         self.set_status(&status);
+        let log_line = if has_error {
+            format!("{}：{error}  {}: {}", tr("Status", "interrupted"), tr("Status", "file"), self.out_path.display())
+        } else {
+            let elapsed = unsafe { GetTickCount64() } - self.start_tick;
+            format!("{}  {}  {}: {}", tr("Status", "completed"), format_duration(elapsed), tr("Status", "file"), self.out_path.display())
+        };
+        append_log(&log_line);
 
         // 用户手动停止了自动开始的录制 → 本次会议内抑制自动重开
         if self.auto_started {
@@ -516,7 +715,10 @@ impl App {
             }
         }
 
-        set_window_text(self.btn_start, "开始录制");
+        self.record_count += 1;
+        set_window_text(self.record_count_text, &format!("{}: {}", tr("UI", "record_count"), self.record_count));
+
+        set_window_text(self.btn_start, tr("UI", "btn_start"));
         unsafe {
             EnableWindow(self.combo, TRUE);
             EnableWindow(self.combo_mic, TRUE);
@@ -547,10 +749,11 @@ impl App {
             if self.session.is_some() && self.auto_started {
                 self.inactive_polls += 1;
                 if self.inactive_polls >= WATCH_GRACE_POLLS {
+                    append_log(&format!("Teams meeting ended, auto stop  file: {}", self.out_path.display()));
                     self.stop_recording();
                     self.inactive_polls = 0;
                     let path = self.out_path.display().to_string();
-                    self.set_status(&format!("Teams 会议已结束，录制自动停止。\r\n文件: {path}"));
+                    self.set_status(&format!("{}: {}\r\n{}: {}\r\n{}\r\n{}: {path}", tr("Status", "start"), self.start_time, tr("Status", "end"), timestamp(), tr("Status", "teams_stopped"), tr("Status", "file")));
                 }
             } else {
                 self.inactive_polls = 0;
@@ -578,9 +781,9 @@ impl App {
                 GetSystemMetrics(SM_CYSMICON),
                 LR_SHARED,
             );
-            let mut tip = "桌面音频录制".to_string();
+            let mut tip = tr("UI", "app_title").to_string();
             if self.session.is_some() {
-                tip.push_str("（录制中）");
+                tip.push_str(&format!("（{}）", tr("Status", "recording")));
             }
             let tip_wide = to_wide(&tip);
             let n = tip_wide.len().min(nid.szTip.len());
@@ -697,7 +900,7 @@ unsafe fn fill_device_combo(
     let mut ids: Vec<Vec<u16>> = Vec::new();
 
     let base = if add_none {
-        combo_add_string(combo, "（不录制）");
+        combo_add_string(combo, tr("UI", "mic_none"));
         1
     } else {
         0
@@ -715,7 +918,7 @@ unsafe fn fill_device_combo(
         if add_none {
             combo_set_cur_sel(combo, 0);
         }
-        return (ids, Some("初始化设备枚举器失败。".to_string()));
+        return (ids, Some(tr("Status", "error_capture").to_string()));
     }
     let enumerator_ref = enumerator.expect_ref();
 
@@ -777,7 +980,7 @@ unsafe fn fill_device_combo(
                 PropVariantClear(&mut pv);
             }
 
-            let label = if name.is_empty() { "(未知设备)" } else { name.as_str() };
+            let label = if name.is_empty() { "?" } else { name.as_str() };
             let index = combo_add_string(combo, label);
             if !id.is_empty() && id == default_id {
                 select_index = index;
@@ -787,9 +990,8 @@ unsafe fn fill_device_combo(
     }
 
     let status = if ids.is_empty() && !add_none {
-        // 播放设备一个都没有就没法录了
         if flow == eRender {
-            Some("未找到可用的播放设备。".to_string())
+            Some(tr("Status", "error_no_playback").to_string())
         } else {
             None
         }
@@ -823,6 +1025,34 @@ fn make_output_path() -> PathBuf {
     dir.join(name)
 }
 
+fn timestamp() -> String {
+    let mut st = SYSTEMTIME::default();
+    unsafe { GetLocalTime(&mut st) };
+    format!("[{:04}-{:02}-{:02} {:02}:{:02}:{:02}]", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond)
+}
+
+fn append_log(line: &str) {
+    let mut exe_path = [0u16; MAX_PATH];
+    let exe: PathBuf;
+    unsafe {
+        let len = GetModuleFileNameW(null_mut(), exe_path.as_mut_ptr(), MAX_PATH as DWORD);
+        exe = PathBuf::from(from_wide(&exe_path[..len as usize]));
+    }
+    let st = timestamp();
+    let log_name = format!("{}-{:04}{:02}.log", exe.file_stem().unwrap_or_default().to_string_lossy(), &st[1..5], &st[6..8]);
+    let log_path = exe.parent().unwrap_or(Path::new(".")).join(log_name);
+
+    let need_bom = !log_path.exists() || std::fs::metadata(&log_path).map(|m| m.len() == 0).unwrap_or(true);
+    use std::io::Write;
+    let f = std::fs::OpenOptions::new().create(true).append(!need_bom).write(true).open(&log_path);
+    if let Ok(mut f) = f {
+        if need_bom {
+            let _ = f.write_all(&[0xEF, 0xBB, 0xBF]);
+        }
+        let _ = writeln!(f, "{} {}", st, line);
+    }
+}
+
 /// `mm:ss` 或 `h:mm:ss`，与 C++ 版的 `FormatDuration` 一致。
 fn format_duration(ms: u64) -> String {
     let s = ms / 1000;
@@ -843,8 +1073,8 @@ unsafe fn show_tray_menu(hwnd: HWND) {
     if menu.is_null() {
         return;
     }
-    let open = to_wide("打开");
-    let exit = to_wide("退出");
+    let open = to_wide(tr("Menu", "tray_open"));
+    let exit = to_wide(tr("Menu", "tray_exit"));
     AppendMenuW(menu, MF_STRING, IDM_TRAY_OPEN, open.as_ptr());
     AppendMenuW(menu, MF_STRING, IDM_TRAY_EXIT, exit.as_ptr());
 
@@ -902,12 +1132,24 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
                     IDC_BTN_REFRESH => {
                         if app.session.is_none() {
                             app.refresh_devices();
-                            app.set_status("设备列表已刷新。");
+                            app.set_status(tr("Status", "devices_refreshed"));
                         }
                         None
                     }
                     IDC_CHK_AUTOTEAMS => {
                         app.on_auto_teams_toggled();
+                        None
+                    }
+                    IDC_BTN_OPENFOLDER => {
+                        drop(app);
+                        let mut exe_path = [0u16; MAX_PATH];
+                        let len = GetModuleFileNameW(null_mut(), exe_path.as_mut_ptr(), MAX_PATH as DWORD);
+                        let dir = PathBuf::from(from_wide(&exe_path[..len as usize]));
+                        if let Some(parent) = dir.parent() {
+                            let dir_wide = to_wide(&parent.to_string_lossy());
+                            let open_wide = to_wide("open");
+                            ShellExecuteW(hwnd, open_wide.as_ptr(), dir_wide.as_ptr(), null_mut(), null_mut(), SW_SHOWNORMAL);
+                        }
                         None
                     }
                     _ => None,
@@ -921,8 +1163,58 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
         }
 
         WM_SYSCOMMAND => {
-            if (wp & SC_MASK) == SC_MINIMIZE {
+            let cmd = (wp & 0xFFF0) as usize;
+            if cmd == SC_MINIMIZE {
                 APP.with(|cell| cell.borrow_mut().minimize_to_tray());
+                return 0;
+            }
+            let id = (wp & 0xFFFF) as usize;
+            if id == IDM_SYS_ABOUT {
+                let about = format!(
+                    "{}\r\n\r\n{}\r\n{}\r\n\r\n{}\r\n{}\r\n{}\r\n{}",
+                    tr("About", "line1"),
+                    tr("About", "line2"),
+                    tr("About", "line3"),
+                    tr("About", "line4"),
+                    tr("About", "line5"),
+                    tr("About", "line6"),
+                    tr("About", "line7"),
+                );
+                let text = to_wide(&about);
+                let title = to_wide(tr("About", "title"));
+                MessageBoxW(hwnd, text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
+            if id == IDM_LANG_ZHCN || id == IDM_LANG_ENUS {
+                let new_locale = if id == IDM_LANG_ZHCN { "zh-CN" } else { "en-US" };
+                save_config(new_locale);
+                let _ = LOCALE.set(new_locale.to_string());
+                load_lang_file(new_locale);
+                APP.with(|cell| {
+                    let mut app = cell.borrow_mut();
+                    unsafe {
+                        KillTimer(app.hwnd, TIMER_WATCH);
+                        // Destroy all child windows manually (avoid EnumChildWindows skip bug)
+                        let mut child = GetWindow(app.hwnd, GW_CHILD);
+                        while !child.is_null() {
+                            let next = GetWindow(child, GW_HWNDNEXT);
+                            DestroyWindow(child);
+                            child = next;
+                        }
+                        app.combo = null_mut();
+                        app.combo_mic = null_mut();
+                        app.btn_start = null_mut();
+                        app.btn_refresh = null_mut();
+                        app.btn_open_folder = null_mut();
+                        app.record_count_text = null_mut();
+                        app.status = null_mut();
+                        app.chk_aec = null_mut();
+                        app.chk_auto_teams = null_mut();
+                        app.recreate_controls(hwnd);
+                        app.refresh_devices();
+                        SetTimer(hwnd, TIMER_WATCH, 2000, null_mut());
+                    }
+                });
                 return 0;
             }
             DefWindowProcW(hwnd, msg, wp, lp)
@@ -962,8 +1254,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
                     app.stop_recording();
                 }
             });
+            let ts = timestamp();
             PendingMessage::recording_error(message.clone()).show(hwnd);
-            APP.with(|cell| cell.borrow_mut().set_status(&format!("录制中断：{message}")));
+            APP.with(|cell| cell.borrow_mut().set_status(&format!("结束: {ts}\r\n录制中断：{message}")));
             0
         }
 
@@ -997,6 +1290,7 @@ pub fn run() -> i32 {
     // Safety: 整个函数都在 UI 线程上执行；所有句柄都来自系统 API。
     unsafe {
         // 让通用控件使用系统主题（主题清单由 build.rs 嵌入）
+        load_config();
         let _com = ComApartment::sta();
         let icc = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as DWORD,
@@ -1037,10 +1331,10 @@ pub fn run() -> i32 {
         RegisterClassExW(&window_class);
 
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        let mut rect = RECT { left: 0, top: 0, right: 520, bottom: 250 };
+        let mut rect = RECT { left: 0, top: 0, right: 520, bottom: 280 };
         AdjustWindowRect(&mut rect, style, FALSE);
 
-        let title = to_wide("桌面音频录制 (Desktop Audio Recorder)");
+        let title = to_wide(tr("UI", "app_title"));
         let hwnd = CreateWindowExW(
             0,
             class_name.as_ptr(),
