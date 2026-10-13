@@ -399,15 +399,15 @@ impl App {
             } else {
                 self.btn_start = make("BUTTON", tr("UI", "btn_start"), 0, 12, 84, 130, 30, IDC_BTN_START);
             }
-            self.btn_open_folder = make("BUTTON", tr("UI", "btn_open_folder"), 0, 12, 118, 100, 25, IDC_BTN_OPENFOLDER);
             let count_text = format!("{}: {}", tr("UI", "record_count"), self.record_count);
-            self.record_count_text = make("STATIC", &count_text, SS_LEFT, 116, 122, 70, 18, -1);
+            self.record_count_text = make("STATIC", &count_text, SS_LEFT, 146, 88, 70, 18, -1);
+            self.btn_open_folder = make("BUTTON", tr("UI", "btn_open_folder"), 0, 220, 84, 100, 25, IDC_BTN_OPENFOLDER);
             self.chk_aec = make(
                 "BUTTON",
                 tr("UI", "chk_aec"),
                 BS_AUTOCHECKBOX,
-                156,
-                88,
+                12,
+                118,
                 160,
                 22,
                 IDC_CHK_AEC,
@@ -417,9 +417,9 @@ impl App {
                 "BUTTON",
                 tr("UI", "chk_auto_teams"),
                 BS_AUTOCHECKBOX,
-                316,
-                88,
-                160,
+                180,
+                118,
+                220,
                 22,
                 IDC_CHK_AUTOTEAMS,
             );
@@ -432,9 +432,9 @@ impl App {
                 empty.as_ptr(),
                 WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
                 12,
-                152,
+                148,
                 496,
-                86,
+                110,
                 hwnd,
                 IDC_EDIT_STATUS as usize as HMENU,
                 null_mut(),

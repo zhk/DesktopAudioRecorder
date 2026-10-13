@@ -38,6 +38,11 @@ bool IsMeetingProcess(DWORD pid, std::wstring &app)
 		app = L"DingTalk";
 		return true;
 	}
+	if (_wcsicmp(name, L"wemeet.exe") == 0 || _wcsicmp(name, L"wemeetapp.exe") == 0 || _wcsicmp(name, L"wemeetlauncher.exe") == 0)
+	{
+		app = L"TencentMeeting";
+		return true;
+	}
 	return false;
 }
 

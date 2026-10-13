@@ -116,20 +116,20 @@ void RecreateControls(HWND hwnd)
 	make(L"STATIC", S(L"UI", L"label_mic"), SS_LEFT, 12, 50, 64, 18, -1);
 	g_comboMic = make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 80, 46, 352, 300, IDC_COMBO_MIC);
 	g_btnStart = make(L"BUTTON", S(L"UI", L"btn_start"), 0, 12, 84, 130, 30, IDC_BTN_START);
-	g_btnOpenFolder = make(L"BUTTON", S(L"UI", L"btn_open_folder"), 0, 12, 118, 100, 25, IDC_BTN_OPENFOLDER);
-	g_recordCountText = make(L"STATIC", L"", SS_LEFT, 116, 122, 70, 18, -1);
+	g_recordCountText = make(L"STATIC", L"", SS_LEFT, 146, 88, 70, 18, -1);
 	wchar_t countBuf[32]{};
 	swprintf_s(countBuf, L"%s: %d", S(L"UI", L"record_count"), g_recordCount);
 	SetWindowTextW(g_recordCountText, countBuf);
-	g_chkAec = make(L"BUTTON", S(L"UI", L"chk_aec"), BS_AUTOCHECKBOX, 156, 88, 160, 22, IDC_CHK_AEC);
+	g_btnOpenFolder = make(L"BUTTON", S(L"UI", L"btn_open_folder"), 0, 220, 84, 100, 25, IDC_BTN_OPENFOLDER);
+	g_chkAec = make(L"BUTTON", S(L"UI", L"chk_aec"), BS_AUTOCHECKBOX, 12, 118, 160, 22, IDC_CHK_AEC);
 	Button_SetCheck(g_chkAec, BST_CHECKED);
-	g_chkAutoTeams = make(L"BUTTON", S(L"UI", L"chk_auto_teams"), BS_AUTOCHECKBOX, 316, 88, 180, 22,
+	g_chkAutoTeams = make(L"BUTTON", S(L"UI", L"chk_auto_teams"), BS_AUTOCHECKBOX, 180, 118, 220, 22,
 			      IDC_CHK_AUTOTEAMS);
 
 	g_status = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
 				   WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
 					   WS_VSCROLL,
-				   12, 152, 496, 86, hwnd,
+				   12, 148, 496, 110, hwnd,
 				   reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_STATUS)),
 				   nullptr, nullptr);
 	SendMessageW(g_status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);

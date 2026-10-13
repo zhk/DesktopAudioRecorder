@@ -357,7 +357,7 @@ void OnWatchTick()
 		{
 			if (++g_inactivePolls >= WATCH_GRACE_POLLS)
 			{
-				AppendLog(L"Meeting ended (Teams/WeChat/DingTalk), auto stop  file: " + g_outPath);
+				AppendLog(L"Meeting ended (Teams/WeChat/DingTalk/TencentMeeting), auto stop  file: " + g_outPath);
 				StopRecording();
 				g_inactivePolls = 0;
 				SetStatus(std::wstring(S(L"Status", L"start")) + L": " + g_startTime + L"\r\n" + S(L"Status", L"end") + L": " + Timestamp() + L"\r\n" + S(L"Status", L"teams_stopped") + L"\r\n" + S(L"Status", L"file") + L": " + g_outPath);
