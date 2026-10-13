@@ -123,7 +123,7 @@ void RecreateControls(HWND hwnd)
 	SetWindowTextW(g_recordCountText, countBuf);
 	g_chkAec = make(L"BUTTON", S(L"UI", L"chk_aec"), BS_AUTOCHECKBOX, 156, 88, 160, 22, IDC_CHK_AEC);
 	Button_SetCheck(g_chkAec, BST_CHECKED);
-	g_chkAutoTeams = make(L"BUTTON", S(L"UI", L"chk_auto_teams"), BS_AUTOCHECKBOX, 316, 88, 160, 22,
+	g_chkAutoTeams = make(L"BUTTON", S(L"UI", L"chk_auto_teams"), BS_AUTOCHECKBOX, 316, 88, 180, 22,
 			      IDC_CHK_AUTOTEAMS);
 
 	g_status = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
@@ -220,13 +220,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			{
 				g_autoSuppress = false;
 				g_inactivePolls = 0;
-				AppendLog(L"Teams monitor ON");
+				AppendLog(L"Meeting monitor ON");
 				if (!g_recording)
 					SetStatus(S(L"Status", L"auto_teams_on"));
 			}
 			else
 			{
-				AppendLog(L"Teams monitor OFF");
+				AppendLog(L"Meeting monitor OFF");
 			}
 			return 0;
 		case IDC_BTN_OPENFOLDER:

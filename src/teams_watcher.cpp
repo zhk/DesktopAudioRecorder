@@ -8,7 +8,7 @@
 namespace
 {
 
-bool IsTeamsProcess(DWORD pid)
+bool IsMeetingProcess(DWORD pid, std::wstring &app)
 {
 	HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
 	if (!h)
@@ -22,14 +22,31 @@ bool IsTeamsProcess(DWORD pid)
 
 	const wchar_t *name = wcsrchr(path, L'\\');
 	name = name ? name + 1 : path;
-	return _wcsicmp(name, L"teams.exe") == 0 || _wcsicmp(name, L"ms-teams.exe") == 0;
+
+	if (_wcsicmp(name, L"teams.exe") == 0 || _wcsicmp(name, L"ms-teams.exe") == 0)
+	{
+		app = L"Teams";
+		return true;
+	}
+	if (_wcsicmp(name, L"wechat.exe") == 0 || _wcsicmp(name, L"weixin.exe") == 0)
+	{
+		app = L"WeChat";
+		return true;
+	}
+	if (_wcsicmp(name, L"dingtalk.exe") == 0 || _wcsicmp(name, L"dingtalklite.exe") == 0 || _wcsicmp(name, L"DingTalk.exe") == 0)
+	{
+		app = L"DingTalk";
+		return true;
+	}
+	return false;
 }
 
 } // namespace
 
-bool TeamsWatcher::MeetingActive()
+bool TeamsWatcher::MeetingActive(std::wstring &app)
 {
 	bool active = false;
+	app.clear();
 
 	IMMDeviceEnumerator *enumerator = nullptr;
 	HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
@@ -72,7 +89,7 @@ bool TeamsWatcher::MeetingActive()
 								  reinterpret_cast<void **>(&ctl2))))
 								  {
 					DWORD pid = 0;
-					if (SUCCEEDED(ctl2->GetProcessId(&pid)) && pid != 0 && IsTeamsProcess(pid))
+					if (SUCCEEDED(ctl2->GetProcessId(&pid)) && pid != 0 && IsMeetingProcess(pid, app))
 						active = true;
 					ctl2->Release();
 				}

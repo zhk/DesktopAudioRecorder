@@ -27,6 +27,7 @@ extern std::wstring g_startTime;
 extern std::wstring g_outPath;
 extern std::wstring g_deviceName;
 extern std::wstring g_micName;
+extern std::wstring g_meetingApp;
 
 void SetStatus(const std::wstring &text);
 void ShowRecordingStatus();

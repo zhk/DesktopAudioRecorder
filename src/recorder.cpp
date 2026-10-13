@@ -40,6 +40,7 @@ std::wstring g_startTime;
 std::wstring g_outPath;
 std::wstring g_deviceName;
 std::wstring g_micName;
+std::wstring g_meetingApp;
 
 std::wstring MakeOutputPath()
 {
@@ -47,10 +48,18 @@ std::wstring MakeOutputPath()
 	GetModuleFileNameW(nullptr, exePath, MAX_PATH);
 	SYSTEMTIME st{};
 	GetLocalTime(&st);
-	wchar_t name[128];
-	swprintf_s(name, L"recording-%04d%02d%02d-%02d%02d%02d.mp3", st.wYear, st.wMonth, st.wDay, st.wHour,
-		   st.wMinute, st.wSecond);
-	return (std::filesystem::path(exePath).parent_path() / name).wstring();
+
+	std::filesystem::path dir = std::filesystem::path(exePath).parent_path();
+	if (!g_meetingApp.empty())
+	{
+		dir = dir / g_meetingApp;
+		std::filesystem::create_directories(dir);
+	}
+
+	wchar_t name[256];
+	swprintf_s(name, L"%s-%04d%02d%02d-%02d%02d%02d.mp3", g_meetingApp.empty() ? L"recording" : g_meetingApp.c_str(),
+		   st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+	return (dir / name).wstring();
 }
 
 void SetStatus(const std::wstring &text)
@@ -166,6 +175,9 @@ void ShowRecordingStatus()
 
 bool StartRecording(bool fromAuto)
 {
+	if (!fromAuto)
+		g_meetingApp.clear();
+
 	auto fail = [&](const std::wstring &msg)
 	{
 		if (fromAuto)
@@ -299,7 +311,8 @@ void StopRecording()
 	if (g_autoStarted)
 	{
 		g_autoStarted = false;
-		if (Button_GetCheck(g_chkAutoTeams) == BST_CHECKED && TeamsWatcher::MeetingActive())
+		std::wstring dummy;
+		if (Button_GetCheck(g_chkAutoTeams) == BST_CHECKED && TeamsWatcher::MeetingActive(dummy))
 			g_autoSuppress = true;
 	}
 
@@ -324,11 +337,13 @@ void OnWatchTick()
 	if (Button_GetCheck(g_chkAutoTeams) != BST_CHECKED)
 		return;
 
-	if (TeamsWatcher::MeetingActive())
+	std::wstring app;
+	if (TeamsWatcher::MeetingActive(app))
 	{
 		g_inactivePolls = 0;
 		if (!g_recording && !g_autoSuppress)
 		{
+			g_meetingApp = app;
 			if (StartRecording(true))
 				g_autoStarted = true;
 			else
@@ -342,7 +357,7 @@ void OnWatchTick()
 		{
 			if (++g_inactivePolls >= WATCH_GRACE_POLLS)
 			{
-				AppendLog(L"Teams meeting ended, auto stop  file: " + g_outPath);
+				AppendLog(L"Meeting ended (Teams/WeChat/DingTalk), auto stop  file: " + g_outPath);
 				StopRecording();
 				g_inactivePolls = 0;
 				SetStatus(std::wstring(S(L"Status", L"start")) + L": " + g_startTime + L"\r\n" + S(L"Status", L"end") + L": " + Timestamp() + L"\r\n" + S(L"Status", L"teams_stopped") + L"\r\n" + S(L"Status", L"file") + L": " + g_outPath);
