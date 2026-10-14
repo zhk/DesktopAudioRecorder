@@ -290,6 +290,8 @@ struct App {
     status: HWND,
     chk_aec: HWND,
     chk_auto_teams: HWND,
+    aec_checked: bool,
+    auto_teams_checked: bool,
 
     /// 与播放下拉框索引一一对应
     render_ids: Vec<Vec<u16>>,
@@ -325,6 +327,8 @@ impl App {
             status: null_mut(),
             chk_aec: null_mut(),
             chk_auto_teams: null_mut(),
+            aec_checked: true,
+            auto_teams_checked: false,
             render_ids: Vec::new(),
             mic_ids: Vec::new(),
             session: None,
@@ -395,9 +399,9 @@ impl App {
                 IDC_COMBO_MIC,
             );
             if self.session.is_some() {
-                self.btn_start = make("BUTTON", tr("UI", "btn_stop"), 0, 12, 84, 130, 30, IDC_BTN_START);
+                self.btn_start = make("BUTTON", tr("UI", "btn_stop"), 0, 12, 84, 130, 25, IDC_BTN_START);
             } else {
-                self.btn_start = make("BUTTON", tr("UI", "btn_start"), 0, 12, 84, 130, 30, IDC_BTN_START);
+                self.btn_start = make("BUTTON", tr("UI", "btn_start"), 0, 12, 84, 130, 25, IDC_BTN_START);
             }
             let count_text = format!("{}: {}", tr("UI", "record_count"), self.record_count);
             self.record_count_text = make("STATIC", &count_text, SS_LEFT, 146, 88, 70, 18, -1);
@@ -412,7 +416,7 @@ impl App {
                 22,
                 IDC_CHK_AEC,
             );
-            button_set_check(self.chk_aec, true);
+            button_set_check(self.chk_aec, self.aec_checked);
             self.chk_auto_teams = make(
                 "BUTTON",
                 tr("UI", "chk_auto_teams"),
@@ -423,6 +427,7 @@ impl App {
                 22,
                 IDC_CHK_AUTOTEAMS,
             );
+            button_set_check(self.chk_auto_teams, self.auto_teams_checked);
 
             let edit_class = to_wide("EDIT");
             let empty = to_wide("");
@@ -1192,6 +1197,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
                 load_lang_file(new_locale);
                 APP.with(|cell| {
                     let mut app = cell.borrow_mut();
+                    // Save checkbox states before destroying
+                    app.aec_checked = button_checked(app.chk_aec);
+                    app.auto_teams_checked = button_checked(app.chk_auto_teams);
                     unsafe {
                         KillTimer(app.hwnd, TIMER_WATCH);
                         // Destroy all child windows manually (avoid EnumChildWindows skip bug)

@@ -40,6 +40,8 @@ constexpr int IDM_LANG_ENUS = 3003;
 
 bool g_inTray = false;
 static bool g_created = false;
+static bool g_aecSaved = true;
+static bool g_autoTeamsSaved = false;
 
 // ---- 系统托盘 ----
 
@@ -115,16 +117,17 @@ void RecreateControls(HWND hwnd)
 	g_btnRefresh = make(L"BUTTON", S(L"UI", L"btn_refresh"), 0, 440, 11, 68, 25, IDC_BTN_REFRESH);
 	make(L"STATIC", S(L"UI", L"label_mic"), SS_LEFT, 12, 50, 64, 18, -1);
 	g_comboMic = make(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 80, 46, 352, 300, IDC_COMBO_MIC);
-	g_btnStart = make(L"BUTTON", S(L"UI", L"btn_start"), 0, 12, 84, 130, 30, IDC_BTN_START);
+	g_btnStart = make(L"BUTTON", S(L"UI", L"btn_start"), 0, 12, 84, 130, 25, IDC_BTN_START);
 	g_recordCountText = make(L"STATIC", L"", SS_LEFT, 146, 88, 70, 18, -1);
 	wchar_t countBuf[32]{};
 	swprintf_s(countBuf, L"%s: %d", S(L"UI", L"record_count"), g_recordCount);
 	SetWindowTextW(g_recordCountText, countBuf);
 	g_btnOpenFolder = make(L"BUTTON", S(L"UI", L"btn_open_folder"), 0, 220, 84, 100, 25, IDC_BTN_OPENFOLDER);
 	g_chkAec = make(L"BUTTON", S(L"UI", L"chk_aec"), BS_AUTOCHECKBOX, 12, 118, 160, 22, IDC_CHK_AEC);
-	Button_SetCheck(g_chkAec, BST_CHECKED);
+	Button_SetCheck(g_chkAec, g_aecSaved ? BST_CHECKED : BST_UNCHECKED);
 	g_chkAutoTeams = make(L"BUTTON", S(L"UI", L"chk_auto_teams"), BS_AUTOCHECKBOX, 180, 118, 220, 22,
 			      IDC_CHK_AUTOTEAMS);
+	Button_SetCheck(g_chkAutoTeams, g_autoTeamsSaved ? BST_CHECKED : BST_UNCHECKED);
 
 	g_status = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
 				   WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
@@ -177,6 +180,10 @@ void ReloadUI()
 {
 	HWND hwnd = g_hwnd;
 	if (!hwnd) return;
+
+	g_aecSaved = (g_chkAec && Button_GetCheck(g_chkAec) == BST_CHECKED);
+	g_autoTeamsSaved = (g_chkAutoTeams && Button_GetCheck(g_chkAutoTeams) == BST_CHECKED);
+
 	KillTimer(hwnd, TIMER_WATCH);
 
 	HWND child = GetWindow(hwnd, GW_CHILD);
@@ -215,8 +222,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 				SetStatus(S(L"Status", L"devices_refreshed"));
 			}
 			return 0;
-		case IDC_CHK_AUTOTEAMS:
-			if (Button_GetCheck(g_chkAutoTeams) == BST_CHECKED)
+		case IDC_CHK_AUTOTEAMS: {
+			bool checked = Button_GetCheck(g_chkAutoTeams) == BST_CHECKED;
+			g_autoTeamsSaved = checked;
+			if (checked)
 			{
 				g_autoSuppress = false;
 				g_inactivePolls = 0;
@@ -227,6 +236,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			else
 			{
 				AppendLog(L"Meeting monitor OFF");
+			}
 			}
 			return 0;
 		case IDC_BTN_OPENFOLDER:
