@@ -23,11 +23,11 @@ use crate::audio_mixer::AudioMixer;
 use crate::ffi::system::{
     AdjustWindowRect, AppendMenuW, CoCreateInstance, CoTaskMemFree, ComApartment, CreatePopupMenu,
     CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, EnableWindow,
-GetCursorPos, GetLocalTime, GetMenuItemCount, GetMessageW, GetModuleFileNameW, GetModuleHandleW,
+    FindWindowW, GetCursorPos, GetLocalTime, GetMenuItemCount, GetMessageW, GetModuleFileNameW, GetModuleHandleW,
 GetPrivateProfileStringW, GetStockObject,
 GetSystemMenu, GetSystemMetrics, GetTickCount64, GetUserDefaultUILanguage, GetWindow, GetWindowTextW,
-    InitCommonControlsEx, KillTimer, LoadCursorW, LoadImageW, MessageBoxW, PostMessageW,
-    PostQuitMessage, PropVariantClear, RegisterClassExW, RemoveMenu, SendMessageW, SetCursor,
+    InitCommonControlsEx, KillTimer, LoadCursorW, LoadImageW,
+    MessageBoxW, PostMessageW, PostQuitMessage, PropVariantClear, RegisterClassExW, RemoveMenu, SendMessageW, SetCursor,
     SetForegroundWindow, SetTimer, SetWindowTextW, Shell_NotifyIconW, ShowWindow, TrackPopupMenu,
     TranslateMessage, UpdateWindow, WritePrivateProfileStringW, BM_GETCHECK, BM_SETCHECK,
     BS_AUTOCHECKBOX, BST_CHECKED, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL,
@@ -1297,6 +1297,15 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
 pub fn run() -> i32 {
     // Safety: 整个函数都在 UI 线程上执行；所有句柄都来自系统 API。
     unsafe {
+        // 单进程限制
+        let class_name = to_wide("DesktopAudioRecorder");
+        let exist = FindWindowW(class_name.as_ptr(), null_mut());
+        if !exist.is_null() {
+            SetForegroundWindow(exist);
+            ShowWindow(exist, SW_RESTORE);
+            return 0;
+        }
+
         // 让通用控件使用系统主题（主题清单由 build.rs 嵌入）
         load_config();
         let _com = ComApartment::sta();

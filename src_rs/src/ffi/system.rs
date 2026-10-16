@@ -334,6 +334,8 @@ unsafe extern "system" {
 
     pub fn SetForegroundWindow(hWnd: HWND) -> BOOL;
     pub fn GetCursorPos(lpPoint: *mut POINT) -> BOOL;
+    pub fn FindWindowW(lpClassName: LPCWSTR, lpWindowName: LPCWSTR) -> HWND;
+    pub fn IsIconic(hWnd: HWND) -> BOOL;
 
     pub fn CreatePopupMenu() -> HMENU;
     pub fn AppendMenuW(hMenu: HMENU, uFlags: UINT, uIDNewItem: UINT_PTR, lpNewItem: LPCWSTR)

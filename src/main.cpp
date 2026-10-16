@@ -330,6 +330,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd)
 {
+	// 单进程限制：查找是否已有同窗口类名的窗口
+	HWND exist = FindWindowW(L"DesktopAudioRecorder", nullptr);
+	if (exist)
+	{
+		SetForegroundWindow(exist);
+		ShowWindow(exist, SW_RESTORE);
+		return 0;
+	}
+
 	CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 	INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_STANDARD_CLASSES};
 	InitCommonControlsEx(&icc);
