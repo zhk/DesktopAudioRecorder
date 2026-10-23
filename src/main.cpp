@@ -12,6 +12,7 @@
 #include "logger.h"
 #include "recorder.h"
 #include "resource.h"
+#include "device_notify.h"
 
 #pragma comment(linker,                                                                  \
     "\"/manifestdependency:type='win32' "                                                \
@@ -31,6 +32,7 @@ constexpr UINT_PTR TIMER_ID = 1;
 constexpr UINT_PTR TIMER_WATCH = 2;
 constexpr UINT WM_RECORD_ERROR = WM_APP + 1;
 constexpr UINT WM_TRAYICON = WM_APP + 2;
+constexpr UINT WM_DEVICE_CHANGE = WM_APP + 4;
 constexpr UINT TRAY_UID = 1;
 constexpr int IDM_TRAY_OPEN = 2001;
 constexpr int IDM_TRAY_EXIT = 2002;
@@ -302,6 +304,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			OnWatchTick();
 		return 0;
 
+	case WM_DEVICE_CHANGE:
+		AppendLog(L"Audio device changed");
+		if (!g_recording)
+		{
+			RefreshDevices();
+			SetStatus(S(L"Status", L"devices_refreshed"));
+		}
+		return 0;
+
 	case WM_RECORD_ERROR:
 	{
 		std::unique_ptr<std::wstring> m(reinterpret_cast<std::wstring *>(lp));
@@ -367,6 +378,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd)
 
 	ShowWindow(hwnd, showCmd);
 	UpdateWindow(hwnd);
+
+	// 注册音频设备变更通知
+	DeviceNotify *notify = new DeviceNotify();
+	IMMDeviceEnumerator *enumDev = nullptr;
+	CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+			 __uuidof(IMMDeviceEnumerator), reinterpret_cast<void **>(&enumDev));
+	if (enumDev)
+		enumDev->RegisterEndpointNotificationCallback(notify);
 
 	MSG msg;
 	while (GetMessageW(&msg, nullptr, 0, 0))

@@ -3,7 +3,7 @@
 Windows 桌面音频录制工具，WASAPI Loopback + 麦克风混音，MP3 编码存储，支持 Teams/微信/钉钉/腾讯会议自动录制。
 
 ## 版本
-v1.1
+v1.2
 
 ## 功能
 
