@@ -35,7 +35,19 @@ v1.2
 
 - **多声道降混**：5.1/7.1 声道降混为立体声——前置 L/R 直通 + 0.707×中置 + 环绕均摊混入两侧，丢弃 LFE 低频通道。
 
-- **线程模型**：每个采集流运行在独立 worker 线程中。
+- **线程模型**：每个采集流运行在独立 worker 线程中（`avrt.dll` 优先级提升）。
+
+### 回声消除 (AEC)
+
+**算法：NLMS 自适应滤波器 + 双讲检测 (DTD)**
+
+- **参考信号**：桌面 loopback 流作为已知参考，学习"扬声器→房间→麦克风"的泄漏路径
+- **滤波器窗口**：4800 taps（100ms @ 48kHz），收敛后形成房间脉冲响应（RIR）
+- **归一化步长**：μ = 0.1（能量归一化，避免参考信号音量突变导致发散）
+- **双讲检测**：Geigel 功率比阈值 0.25，超过则冻结系数更新 150ms（防抖）
+- **能量门控**：安静时直通不处理（`m_norm <= m_eps*1.01`），避免分母趋零
+
+详见 [`src/echo_canceller.{h,cpp}`](src/echo_canceller.h) 与 [`src/audio_mixer.cpp`](src/audio_mixer.cpp)。
 
 ### 混音方案 (AudioMixer)
 
@@ -47,11 +59,6 @@ v1.2
 
 - **混音**：桌面样本和重采样后麦克风样本逐帧相加，软限幅防溢出。
 
-- **回声消除 (AEC，可选）**：
-  - 算法：**NLMS (归一化最小均方）自适应滤波器** + **双讲检测 (DTD)**
-  - 以桌面播放流为参考信号，学习"扬声器→房间→麦克风"的泄漏路径，从麦克风中减去回声估计
-  - DTD 用 Geigel 功率比检测本地说话：冻结滤波器系数更新，仅用已收敛系数继续相减
-  - 滤波器窗口：100ms
 
 ### MP3 编码与存储
 
@@ -65,13 +72,16 @@ v1.2
 
 ### 会议检测
 
-通过 `IAudioSessionManager2` 枚举默认播放设备上的活跃音频会话，匹配进程名：
+通过 [`IAudioSessionManager2`](src/wasapi_capture.h) 枚举默认播放设备上的活跃音频会话，匹配进程名：
+
 - Teams：`teams.exe` / `ms-teams.exe`
 - 微信：`wechat.exe` / `weixin.exe`
 - 钉钉：`dingtalk.exe` / `dingtalklite.exe` / `DingTalk.exe`
 - 腾讯会议：`wemeet.exe` / `wemeetapp.exe` / `wemeetlauncher.exe`
 
 每 2 秒轮询一次，连续 5 次（10 秒）未检测到会议才自动停止录制（防抖）。
+
+勾选「Teams 会议自动录制」后，检测到会议有活跃音频会话就开始录，会议结束自动停止；手动停止后的同一场会议不再自动重开。
 
 ### 整体数据流
 
@@ -84,20 +94,23 @@ v1.2
 
 所有采集和编码组件均不依赖第三方库，纯 Windows 系统 API。
 
-## 编译
+## 编译 (C++ / CMake)
 
-### C++ (CMake)
+**工具链：CMake 4.4.0 + Visual Studio 18 Professional(2026) MSVC 14.51 + Windows SDK 10.0.26100.0**
+
 ```bash
+# 方式一：标准 CMake 构建（沙箱环境需改用 build_release.bat）
 mkdir build && cd build
 cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
+
+# 方式二：一键构建脚本（推荐，绕过 vcvars 的沙箱限制）
+cmd //c build_release.bat
 ```
 
-### Rust (Cargo)
-```bash
-cd src_rs
-cargo build --release
-```
+产物：`build/desktop-audio-recorder.exe`（约 316 KB，x64），`/MT` 静态链接 CRT，无 VC++ Redist 依赖。
+
+**注意**：沙箱环境下 `vcvars64.bat` 会因拦截 `reg.exe` 而失败，此时请直接使用 `build_release.bat`（显式设置 PATH/INCLUDE/LIB）。
 
 ## 作者
 
