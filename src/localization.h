@@ -5,6 +5,8 @@
 
 extern std::wstring g_lang;
 extern std::map<std::wstring, std::wstring> g_str;
+extern bool g_autoStartSaved;
+extern bool g_autoTeamsSaved;
 
 const wchar_t *S(const wchar_t *section, const wchar_t *key);
 std::wstring ExeDir();

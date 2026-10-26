@@ -22,7 +22,7 @@ const PROPERTYKEY kPKeyDeviceFriendlyName = {{0xa45c254e, 0xdf1c, 0x4efd,
 constexpr uint32_t BITRATE = 192000;
 constexpr int WATCH_GRACE_POLLS = 5;
 
-HWND g_hwnd{}, g_combo{}, g_comboMic{}, g_btnStart{}, g_btnRefresh{}, g_btnOpenFolder{}, g_status{}, g_chkAec{}, g_chkAutoTeams{}, g_recordCountText{};
+HWND g_hwnd{}, g_combo{}, g_comboMic{}, g_btnStart{}, g_btnRefresh{}, g_btnOpenFolder{}, g_status{}, g_chkAec{}, g_chkAutoTeams{}, g_recordCountText{}, g_chkAutoStart{};
 int g_recordCount = 0;
 std::vector<std::wstring> g_renderIds;
 std::vector<std::wstring> g_micIds;

@@ -101,12 +101,18 @@ void LoadConfig()
 	wchar_t ini[MAX_PATH]{};
 	swprintf_s(ini, L"%s\\%s.ini", ExeDir().c_str(), ExeName().c_str());
 	wchar_t locale[16]{};
+	wchar_t val[8]{};
 	GetPrivateProfileStringW(L"Language", L"locale", L"", locale, 16, ini);
 	if (locale[0] == L'\0')
 		g_lang = DetectSystemLocale();
 	else
 		g_lang = locale;
 	LoadLangFile(g_lang);
+
+	GetPrivateProfileStringW(L"Options", L"auto_teams", L"0", val, 8, ini);
+	g_autoTeamsSaved = (val[0] == L'1');
+	GetPrivateProfileStringW(L"Options", L"auto_start", L"0", val, 8, ini);
+	g_autoStartSaved = (val[0] == L'1');
 }
 
 void SaveConfig()
@@ -114,4 +120,6 @@ void SaveConfig()
 	wchar_t ini[MAX_PATH]{};
 	swprintf_s(ini, L"%s\\%s.ini", ExeDir().c_str(), ExeName().c_str());
 	WritePrivateProfileStringW(L"Language", L"locale", g_lang.c_str(), ini);
+	WritePrivateProfileStringW(L"Options", L"auto_teams", g_autoTeamsSaved ? L"1" : L"0", ini);
+	WritePrivateProfileStringW(L"Options", L"auto_start", g_autoStartSaved ? L"1" : L"0", ini);
 }

@@ -27,12 +27,13 @@ use crate::ffi::system::{
 GetPrivateProfileStringW, GetStockObject,
 GetSystemMenu, GetSystemMetrics, GetTickCount64, GetUserDefaultUILanguage, GetWindow, GetWindowTextW,
     InitCommonControlsEx, KillTimer, LoadCursorW, LoadImageW,
-    MessageBoxW, PostMessageW, PostQuitMessage, PropVariantClear, RegisterClassExW, RemoveMenu, SendMessageW, SetCursor,
-    SetForegroundWindow, SetTimer, SetWindowTextW, Shell_NotifyIconW, ShowWindow, TrackPopupMenu,
-    TranslateMessage, UpdateWindow, WritePrivateProfileStringW, BM_GETCHECK, BM_SETCHECK,
+    MessageBoxW, PostMessageW, PostQuitMessage, PropVariantClear, RegisterClassExW, RemoveMenu, SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowTextW, Shell_NotifyIconW,
+    ShowWindow, TrackPopupMenu, TranslateMessage, UpdateWindow, RegCreateKeyExW, RegSetValueExW,
+    RegDeleteValueW, RegCloseKey, WritePrivateProfileStringW, BM_GETCHECK, BM_SETCHECK,
     BS_AUTOCHECKBOX, BST_CHECKED, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL,
     CBS_DROPDOWNLIST, COLOR_BTNFACE, CW_USEDEFAULT, DEFAULT_GUI_FONT, ES_AUTOVSCROLL, ES_MULTILINE,
     ES_READONLY, ICC_STANDARD_CLASSES, IDC_ARROW, IDC_WAIT, IMAGE_ICON, INITCOMMONCONTROLSEX, GW_CHILD, GW_HWNDNEXT,
+    HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, ERROR_SUCCESS,
     LR_DEFAULTSIZE, LR_SHARED, MAX_PATH, MB_OK, MB_ICONERROR, MB_ICONINFORMATION, MF_BYPOSITION,
     MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
     NIM_DELETE, NOTIFYICONDATAW, POINT, RECT, SC_MINIMIZE, SM_CXSMICON, SM_CYSMICON, SS_LEFT, SW_HIDE,
@@ -48,7 +49,7 @@ use crate::ffi::wasapi::{
     STGM_READ,
 };
 use crate::ffi::{
-    failed, make_int_resource, succeeded, Com, ComPtr, DWORD, HBRUSH, HCURSOR, HICON,
+    failed, make_int_resource, succeeded, Com, ComPtr, DWORD, HBRUSH, HCURSOR, HICON, HKEY,
     HMENU, HWND, LPARAM, LPCWSTR, LPWSTR, LRESULT, PROPVARIANT, SendableHwnd, UINT, UINT_PTR,
     WPARAM, CLSCTX_ALL, FALSE, TRUE, VT_LPWSTR,
 };
@@ -67,6 +68,7 @@ const IDC_COMBO_MIC: i32 = 1005;
 const IDC_CHK_AEC: i32 = 1006;
 const IDC_CHK_AUTOTEAMS: i32 = 1007;
 const IDC_BTN_OPENFOLDER: i32 = 1008;
+const IDC_CHK_AUTOSTART: i32 = 1010;
 
 const TIMER_ID: usize = 1;
 const TIMER_WATCH: usize = 2;
@@ -171,6 +173,10 @@ fn load_config() {
     let sec_wide = crate::util::to_wide("Language");
     let default_wide = crate::util::to_wide("");
     let mut buf = [0u16; 16];
+    let opts_wide = crate::util::to_wide("Options");
+    let kt_wide = crate::util::to_wide("auto_teams");
+    let ks_wide = crate::util::to_wide("auto_start");
+    let zero_wide = crate::util::to_wide("0");
     unsafe {
         GetPrivateProfileStringW(sec_wide.as_ptr(), key_wide.as_ptr(), default_wide.as_ptr(), buf.as_mut_ptr(), 16, ini_wide.as_ptr());
     }
@@ -181,6 +187,20 @@ fn load_config() {
     };
     let _ = LOCALE.set(locale.clone());
     load_lang_file(&locale);
+
+    unsafe {
+        GetPrivateProfileStringW(opts_wide.as_ptr(), kt_wide.as_ptr(), zero_wide.as_ptr(), buf.as_mut_ptr(), 8, ini_wide.as_ptr());
+    }
+    let auto_teams = buf[0] == '1' as u16;
+    unsafe {
+        GetPrivateProfileStringW(opts_wide.as_ptr(), ks_wide.as_ptr(), zero_wide.as_ptr(), buf.as_mut_ptr(), 8, ini_wide.as_ptr());
+    }
+    let auto_start = buf[0] == '1' as u16;
+    APP.with(|cell| {
+        let mut app = cell.borrow_mut();
+        app.auto_teams_checked = auto_teams;
+        app.auto_start_checked = auto_start;
+    });
 }
 
 fn save_config(locale: &str) {
@@ -188,11 +208,19 @@ fn save_config(locale: &str) {
     let name = exe_name();
     let ini_path = format!("{}\\{}.ini", dir, name);
     let ini_wide = crate::util::to_wide(&ini_path);
-    let sec_wide = crate::util::to_wide("Language");
-    let key_wide = crate::util::to_wide("locale");
-    let val_wide = crate::util::to_wide(locale);
     unsafe {
-        WritePrivateProfileStringW(sec_wide.as_ptr(), key_wide.as_ptr(), val_wide.as_ptr(), ini_wide.as_ptr());
+        let sec = crate::util::to_wide("Language");
+        let key = crate::util::to_wide("locale");
+        let val = crate::util::to_wide(locale);
+        WritePrivateProfileStringW(sec.as_ptr(), key.as_ptr(), val.as_ptr(), ini_wide.as_ptr());
+
+        let opts = crate::util::to_wide("Options");
+        let k1 = crate::util::to_wide("auto_teams");
+        let k2 = crate::util::to_wide("auto_start");
+        let v1 = crate::util::to_wide(if APP.with(|c| c.borrow().auto_teams_checked) { "1" } else { "0" });
+        let v2 = crate::util::to_wide(if APP.with(|c| c.borrow().auto_start_checked) { "1" } else { "0" });
+        WritePrivateProfileStringW(opts.as_ptr(), k1.as_ptr(), v1.as_ptr(), ini_wide.as_ptr());
+        WritePrivateProfileStringW(opts.as_ptr(), k2.as_ptr(), v2.as_ptr(), ini_wide.as_ptr());
     }
 }
 
@@ -290,8 +318,10 @@ struct App {
     status: HWND,
     chk_aec: HWND,
     chk_auto_teams: HWND,
+    chk_auto_start: HWND,
     aec_checked: bool,
     auto_teams_checked: bool,
+    auto_start_checked: bool,
 
     /// 与播放下拉框索引一一对应
     render_ids: Vec<Vec<u16>>,
@@ -327,8 +357,10 @@ impl App {
             status: null_mut(),
             chk_aec: null_mut(),
             chk_auto_teams: null_mut(),
+            chk_auto_start: null_mut(),
             aec_checked: true,
             auto_teams_checked: false,
+            auto_start_checked: false,
             render_ids: Vec::new(),
             mic_ids: Vec::new(),
             session: None,
@@ -406,6 +438,8 @@ impl App {
             let count_text = format!("{}: {}", tr("UI", "record_count"), self.record_count);
             self.record_count_text = make("STATIC", &count_text, SS_LEFT, 146, 88, 70, 18, -1);
             self.btn_open_folder = make("BUTTON", tr("UI", "btn_open_folder"), 0, 220, 84, 100, 25, IDC_BTN_OPENFOLDER);
+            self.chk_auto_start = make("BUTTON", tr("UI", "chk_autostart"), BS_AUTOCHECKBOX, 326, 84, 120, 25, IDC_CHK_AUTOSTART);
+            button_set_check(self.chk_auto_start, self.auto_start_checked);
             self.chk_aec = make(
                 "BUTTON",
                 tr("UI", "chk_aec"),
@@ -1036,6 +1070,30 @@ fn timestamp() -> String {
     format!("[{:04}-{:02}-{:02} {:02}:{:02}:{:02}]", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond)
 }
 
+fn set_auto_start(on: bool) {
+    let mut buf = [0u16; MAX_PATH];
+    unsafe {
+        let len = GetModuleFileNameW(null_mut(), buf.as_mut_ptr(), MAX_PATH as DWORD);
+        let exe_path = crate::util::from_wide(&buf[..len as usize]);
+
+        let sub_key = crate::util::to_wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+        let val_name = crate::util::to_wide("DesktopAudioRecorder");
+        let mut hkey: HKEY = null_mut();
+        if RegCreateKeyExW(HKEY_CURRENT_USER, sub_key.as_ptr(), 0, null_mut(), 0, KEY_SET_VALUE,
+                           null_mut(), &mut hkey, null_mut()) == ERROR_SUCCESS {
+            if on {
+                let val = crate::util::to_wide(&exe_path);
+                RegSetValueExW(hkey, val_name.as_ptr(), 0, REG_SZ,
+                               val.as_ptr() as *const u8,
+                               ((exe_path.len() + 1) * 2) as DWORD);
+            } else {
+                RegDeleteValueW(hkey, val_name.as_ptr());
+            }
+            RegCloseKey(hkey);
+        }
+    }
+}
+
 fn append_log(line: &str) {
     let mut exe_path = [0u16; MAX_PATH];
     let exe: PathBuf;
@@ -1145,6 +1203,13 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
                         app.on_auto_teams_toggled();
                         None
                     }
+                    IDC_CHK_AUTOSTART => {
+                        app.auto_start_checked = button_checked(app.chk_auto_start);
+                        append_log(if app.auto_start_checked { "Auto start ON" } else { "Auto start OFF" });
+                        set_auto_start(app.auto_start_checked);
+                        save_config(LOCALE.get().map(|s| s.as_str()).unwrap_or("en-US"));
+                        None
+                    }
                     IDC_BTN_OPENFOLDER => {
                         drop(app);
                         let mut exe_path = [0u16; MAX_PATH];
@@ -1200,6 +1265,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
                     // Save checkbox states before destroying
                     app.aec_checked = button_checked(app.chk_aec);
                     app.auto_teams_checked = button_checked(app.chk_auto_teams);
+                    app.auto_start_checked = button_checked(app.chk_auto_start);
                     unsafe {
                         KillTimer(app.hwnd, TIMER_WATCH);
                         // Destroy all child windows manually (avoid EnumChildWindows skip bug)

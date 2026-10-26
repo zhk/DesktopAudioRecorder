@@ -9,7 +9,7 @@
 #include "mp3_writer.h"
 #include "wasapi_capture.h"
 
-extern HWND g_hwnd, g_combo, g_comboMic, g_btnStart, g_btnRefresh, g_btnOpenFolder, g_status, g_chkAec, g_chkAutoTeams, g_recordCountText;
+extern HWND g_hwnd, g_combo, g_comboMic, g_btnStart, g_btnRefresh, g_btnOpenFolder, g_status, g_chkAec, g_chkAutoTeams, g_recordCountText, g_chkAutoStart;
 extern int g_recordCount;
 extern std::vector<std::wstring> g_renderIds;
 extern std::vector<std::wstring> g_micIds;

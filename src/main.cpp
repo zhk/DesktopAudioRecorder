@@ -28,6 +28,7 @@ constexpr int IDC_COMBO_MIC = 1005;
 constexpr int IDC_CHK_AEC = 1006;
 constexpr int IDC_CHK_AUTOTEAMS = 1007;
 constexpr int IDC_BTN_OPENFOLDER = 1008;
+constexpr int IDC_CHK_AUTOSTART = 1010;
 constexpr UINT_PTR TIMER_ID = 1;
 constexpr UINT_PTR TIMER_WATCH = 2;
 constexpr UINT WM_RECORD_ERROR = WM_APP + 1;
@@ -43,7 +44,26 @@ constexpr int IDM_LANG_ENUS = 3003;
 bool g_inTray = false;
 static bool g_created = false;
 static bool g_aecSaved = true;
-static bool g_autoTeamsSaved = false;
+bool g_autoTeamsSaved = false;
+bool g_autoStartSaved = false;
+
+void SetAutoStart(bool on)
+{
+	wchar_t exePath[MAX_PATH]{};
+	GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+	HKEY hKey;
+	if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+			    0, nullptr, 0, KEY_SET_VALUE, nullptr, &hKey, nullptr) == ERROR_SUCCESS)
+	{
+		if (on)
+			RegSetValueExW(hKey, L"DesktopAudioRecorder", 0, REG_SZ,
+				       reinterpret_cast<const BYTE *>(exePath),
+				       static_cast<DWORD>((wcslen(exePath) + 1) * sizeof(wchar_t)));
+		else
+			RegDeleteValueW(hKey, L"DesktopAudioRecorder");
+		RegCloseKey(hKey);
+	}
+}
 
 // ---- 系统托盘 ----
 
@@ -125,6 +145,8 @@ void RecreateControls(HWND hwnd)
 	swprintf_s(countBuf, L"%s: %d", S(L"UI", L"record_count"), g_recordCount);
 	SetWindowTextW(g_recordCountText, countBuf);
 	g_btnOpenFolder = make(L"BUTTON", S(L"UI", L"btn_open_folder"), 0, 220, 84, 100, 25, IDC_BTN_OPENFOLDER);
+	g_chkAutoStart = make(L"BUTTON", S(L"UI", L"chk_autostart"), BS_AUTOCHECKBOX, 326, 84, 120, 25, IDC_CHK_AUTOSTART);
+	Button_SetCheck(g_chkAutoStart, g_autoStartSaved ? BST_CHECKED : BST_UNCHECKED);
 	g_chkAec = make(L"BUTTON", S(L"UI", L"chk_aec"), BS_AUTOCHECKBOX, 12, 118, 160, 22, IDC_CHK_AEC);
 	Button_SetCheck(g_chkAec, g_aecSaved ? BST_CHECKED : BST_UNCHECKED);
 	g_chkAutoTeams = make(L"BUTTON", S(L"UI", L"chk_auto_teams"), BS_AUTOCHECKBOX, 180, 118, 220, 22,
@@ -185,6 +207,7 @@ void ReloadUI()
 
 	g_aecSaved = (g_chkAec && Button_GetCheck(g_chkAec) == BST_CHECKED);
 	g_autoTeamsSaved = (g_chkAutoTeams && Button_GetCheck(g_chkAutoTeams) == BST_CHECKED);
+	g_autoStartSaved = (g_chkAutoStart && Button_GetCheck(g_chkAutoStart) == BST_CHECKED);
 
 	KillTimer(hwnd, TIMER_WATCH);
 
@@ -227,6 +250,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		case IDC_CHK_AUTOTEAMS: {
 			bool checked = Button_GetCheck(g_chkAutoTeams) == BST_CHECKED;
 			g_autoTeamsSaved = checked;
+			SaveConfig();
 			if (checked)
 			{
 				g_autoSuppress = false;
@@ -241,6 +265,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			}
 			}
 			return 0;
+		case IDC_CHK_AUTOSTART: {
+			g_autoStartSaved = Button_GetCheck(g_chkAutoStart) == BST_CHECKED;
+			AppendLog(g_autoStartSaved ? L"Auto start ON" : L"Auto start OFF");
+			SetAutoStart(g_autoStartSaved);
+			SaveConfig();
+			return 0;
+		}
 		case IDC_BTN_OPENFOLDER:
 		{
 			wchar_t exePath[MAX_PATH]{};

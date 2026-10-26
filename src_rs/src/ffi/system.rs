@@ -241,6 +241,11 @@ pub const NIF_MESSAGE: UINT = 0x0000_0001;
 pub const NIF_ICON: UINT = 0x0000_0002;
 pub const NIF_TIP: UINT = 0x0000_0004;
 
+pub const HKEY_CURRENT_USER: HKEY = 0x80000001_usize as HKEY;
+pub const REG_SZ: DWORD = 1;
+pub const KEY_SET_VALUE: DWORD = 0x0002;
+pub const ERROR_SUCCESS: LSTATUS = 0;
+
 // ---------------------------------------------------------------------------
 // 外部函数
 // ---------------------------------------------------------------------------
@@ -380,6 +385,31 @@ unsafe extern "system" {
         lpDirectory: LPCWSTR,
         nShowCmd: i32,
     ) -> HINSTANCE;
+}
+
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    pub fn RegCreateKeyExW(
+        hKey: HKEY,
+        lpSubKey: LPCWSTR,
+        Reserved: DWORD,
+        lpClass: LPCWSTR,
+        dwOptions: DWORD,
+        samDesired: DWORD,
+        lpSecurityAttributes: LPVOID,
+        phkResult: *mut HKEY,
+        lpdwDisposition: *mut DWORD,
+    ) -> LSTATUS;
+    pub fn RegSetValueExW(
+        hKey: HKEY,
+        lpValueName: LPCWSTR,
+        Reserved: DWORD,
+        dwType: DWORD,
+        lpData: *const u8,
+        cbData: DWORD,
+    ) -> LSTATUS;
+    pub fn RegDeleteValueW(hKey: HKEY, lpValueName: LPCWSTR) -> LSTATUS;
+    pub fn RegCloseKey(hKey: HKEY) -> LSTATUS;
 }
 
 #[link(name = "ole32")]
