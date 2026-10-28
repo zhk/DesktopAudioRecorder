@@ -1,121 +1,149 @@
 # 桌面音频录制 (Desktop Audio Recorder)
 
-Windows 桌面音频录制工具，WASAPI Loopback + 麦克风混音，MP3 编码存储，支持 Teams/微信/钉钉/腾讯会议自动录制。
+Windows 桌面音频录制工具，WASAPI Loopback + 麦克风混音，MP3 编码存储，支持多会议 App 自动录
+制。
 
 ## 版本
-v1.3
 
-## 功能
+v1.3 (C++) / v1.0.0 (Rust)
 
-- 录制系统播放设备输出（桌面音频）+ 可选麦克风
-- 实时混音成 MP3（192kbps CBR），保存到程序所在目录
-- 可选回声消除（AEC）：消除扬声器声音泄漏到麦克风的回声
-- **会议自动录制**：检测 Teams、微信、钉钉、腾讯会议的活跃音频会话，自动开始/停止录制
-- 录制文件按 App 分目录存放（Teams/WeChat/DingTalk/TencentMeeting/）
-- 系统托盘运行、最小化到托盘
-- 多语言界面（简体中文 / English），支持实时切换
-- 录制日志（UTF-8）
+## 一句话简介
 
-## 系统要求
+录制系统播放设备输出的声音（会议中对方的声音），并可同时混入麦克风（自己的声音），保存为 MP3。
+支持 Teams、微信、钉钉、腾讯会议的自动检测录制。
 
-- Windows 8 及以上（需内置 MP3 编码器 MFT）
-- 不需要额外安装任何运行库，exe 可直接运行
+## 核心能力
 
-## 技术实现
+- 桌面音频录制（WASAPI Loopback）
+- 麦克风录制（可选，独立采集线程）
+- 双路混音 + 线性插值重采样对齐
+- NLMS 回声消除（AEC），带双讲检测
+- Media Foundation 内置 MP3 编码器（192 kbps CBR）
+- 多会议 App 自动检测录制（Teams / 微信 / 钉钉 / 腾讯会议）
+- 会议 App 分目录存放录制文件
+- 系统托盘运行
+- 多语言界面（中文 / English），实时切换
+- 单进程限制
+- 录制日志（UTF-8, 按月切割）
+- 开机自动启动（可选）
+- 设备变更自动检测刷新
 
-### 音频采集 (WASAPI Loopback + Microphone)
+## 不做的范围
 
-**技术：Windows Audio Session API (WASAPI)**
+- 非 Windows 平台
+- 非 MP3 格式输出
+- GPU 加速编码
+- 视频录制
+- 远程网络录制
+- 插件系统
 
-- **桌面音频 (Loopback)**：通过 `AUDCLNT_STREAMFLAGS_LOOPBACK` 标志初始化 `IAudioClient`，直接从系统默认播放设备输出流中抓取 PCM 数据，捕获"扬声器正在播放的声音"。采用事件驱动模式 (`AUDCLNT_STREAMFLAGS_EVENTCALLBACK`)，100ms 缓冲区。
+## 快速开始
 
-- **麦克风输入 (Capture)**：另一条独立的 `IAudioClient` 流，采集默认录音设备输入。
+### 环境要求
 
-- **格式适配**：自动识别 `WAVEFORMATEX` 中的 float32/int16 格式，实时转为 PCM16。
+- **C++ 版**: Windows 8+, Visual Studio 2022 (MSVC 14.44+), CMake 3.24+, Windows SDK 10.0.26100+
+- **Rust 版**: Windows 8+, Rust 1.82+, MSVC toolchain
 
-- **多声道降混**：5.1/7.1 声道降混为立体声——前置 L/R 直通 + 0.707×中置 + 环绕均摊混入两侧，丢弃 LFE 低频通道。
+两个版本均不需要安装 VC++ Redist（静态链接 CRT）。Rust 版零第三方 crate 依赖。
 
-- **线程模型**：每个采集流运行在独立 worker 线程中（`avrt.dll` 优先级提升）。
+### 构建与运行
 
-### 回声消除 (AEC)
-
-**算法：NLMS 自适应滤波器 + 双讲检测 (DTD)**
-
-- **参考信号**：桌面 loopback 流作为已知参考，学习"扬声器→房间→麦克风"的泄漏路径
-- **滤波器窗口**：4800 taps（100ms @ 48kHz），收敛后形成房间脉冲响应（RIR）
-- **归一化步长**：μ = 0.1（能量归一化，避免参考信号音量突变导致发散）
-- **双讲检测**：Geigel 功率比阈值 0.25，超过则冻结系数更新 150ms（防抖）
-- **能量门控**：安静时直通不处理（`m_norm <= m_eps*1.01`），避免分母趋零
-
-详见 [`src/echo_canceller.{h,cpp}`](src/echo_canceller.h) 与 [`src/audio_mixer.cpp`](src/audio_mixer.cpp)。
-
-### 混音方案 (AudioMixer)
-
-- **桌面流为主时钟**：桌面 loopback 流的采样率/声道数作为输出基准。
-
-- **麦克风重采样对齐**：麦克风设备采样率可能与桌面不同（如 48000Hz vs 44100Hz），通过线性插值实现子帧级精度重采样。
-
-- **背压保护**：麦克风缓冲区设容量上限，超出时丢弃最旧数据；欠载时补静音。
-
-- **混音**：桌面样本和重采样后麦克风样本逐帧相加，软限幅防溢出。
-
-
-### MP3 编码与存储
-
-**技术：Windows Media Foundation (MF) Sink Writer + 内置 MP3 编码器**
-
-- `MFCreateSinkWriterFromURL` 创建文件写入器，输出 MP3、输入 PCM16，由系统内置 codec 自动编码
-- **码率**：192 kbps CBR
-- **线程解耦**：采集线程通过 `std::deque` 队列将数据交付给独立编码线程，互不阻塞
-- **背压保护**：队列超过约 5 秒数据时丢弃新包
-- **文件命名**：`[App名]-YYYYMMDD-HHMMSS.mp3`
-
-### 会议检测
-
-通过 [`IAudioSessionManager2`](src/wasapi_capture.h) 枚举默认播放设备上的活跃音频会话，匹配进程名：
-
-- Teams：`teams.exe` / `ms-teams.exe`
-- 微信：`wechat.exe` / `weixin.exe`
-- 钉钉：`dingtalk.exe` / `dingtalklite.exe` / `DingTalk.exe`
-- 腾讯会议：`wemeet.exe` / `wemeetapp.exe` / `wemeetlauncher.exe`
-
-每 2 秒轮询一次，连续 5 次（10 秒）未检测到会议才自动停止录制（防抖）。
-
-勾选「Teams 会议自动录制」后，检测到会议有活跃音频会话就开始录，会议结束自动停止；手动停止后的同一场会议不再自动重开。
-
-### 整体数据流
-
-```
-桌面 Loopback ─┐
-               ├─→ AudioMixer ─→ Mp3Writer (Push 入队) ─→ MF Sink Writer ─→ .mp3 文件
-麦克风 ────重采样──┘         ↑                ↑
-               └─ 可选 AEC ──┘                独立编码线程
-```
-
-所有采集和编码组件均不依赖第三方库，纯 Windows 系统 API。
-
-## 编译 (C++ / CMake)
-
-**工具链：CMake 4.4.0 + Visual Studio 18 Professional(2026) MSVC 14.51 + Windows SDK 10.0.26100.0**
+**C++ (CMake):**
 
 ```bash
-# 方式一：标准 CMake 构建（沙箱环境需改用 build_release.bat）
 mkdir build && cd build
 cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
-
-# 方式二：一键构建脚本（推荐，绕过 vcvars 的沙箱限制）
-cmd //c build_release.bat
+# 产物: build/Release/desktop-audio-recorder.exe
 ```
 
-产物：`build/desktop-audio-recorder.exe`（约 316 KB，x64），`/MT` 静态链接 CRT，无 VC++ Redist 依赖。
+或使用根目录的批处理脚本（在沙箱环境 / 无法调用 vcvars 时）:
 
-**注意**：沙箱环境下 `vcvars64.bat` 会因拦截 `reg.exe` 而失败，此时请直接使用 `build_release.bat`（显式设置 PATH/INCLUDE/LIB）。
+```bash
+build_release.bat
+```
 
-## 作者
+**Rust (Cargo):**
 
-Zhang Kun (zhk.tiger@gmail.com)
+```bash
+cd src_rs
+cargo build --release
+# 产物: src_rs/target/release/desktop-audio-recorder.exe
+```
 
-## 法律声明
+### 运行
 
-本软件仅供合法用途。未经他人明确同意，私自录制通话内容在部分地区可能构成违法。使用前请确保遵守当地法律法规。开发者对因使用本软件产生的任何法律责任概不负责。
+将 exe 和 `lang/` 目录（含 `zh-CN.ini`、`en-US.ini`）放在同一目录下运行即可。
+
+首次运行会在 exe 同目录生成 `[exe名].ini` 配置文件（记录语言选择、checkbox 状态等）。
+
+## 目录结构
+
+| 目录/文件 | 内容 | 维护者 |
+|-----------|------|--------|
+| `src/` | C++ 版全部源码 | 主实现 |
+| `src/main.cpp` | 入口、窗口过程、系统托盘、UI 重建 | |
+| `src/localization.cpp/h` | `S()` 多语言字符串加载、配置读写 | |
+| `src/logger.cpp/h` | 时间戳、UTF-8 日志写入、时长格式化 | |
+| `src/recorder.cpp/h` | 开始/停止录制、设备枚举、混音、AEC 接线、Teams 看门狗 | |
+| `src/wasapi_capture.cpp/h` | WASAPI Loopback/Capture 采集、多声道降混 | |
+| `src/mp3_writer.cpp/h` | Media Foundation MP3 编码、独立编码线程 | |
+| `src/audio_mixer.cpp/h` | 双路混音、麦克风重采样对齐 | |
+| `src/echo_canceller.cpp/h` | NLMS-AEC + 双讲检测 | |
+| `src/teams_watcher.cpp/h` | 音频会话枚举、会议 App 进程匹配 | |
+| `src/device_notify.h` | `IMMNotificationClient` 设备变更通知 | |
+| `src_rs/` | Rust 版全部源码（功能与 C++ 版等价） | 等价实现 |
+| `src_rs/src/app.rs` | GUI 主逻辑 | |
+| `src_rs/src/ffi/` | 手写 Win32/COM/MF FFI 声明 | |
+| `lang/` | 多语言 ini 文件（UTF-16LE, zh-CN / en-US） | |
+| `build/` | C++ CMake 构建目录（gitignore） | 自动生成 |
+| `src_rs/target/` | Rust 构建目录（gitignore） | 自动生成 |
+| `docs/` | 技术文档 | |
+| `docs/aec.md` | 回声消除算法详解 | |
+| `docs/architecture.md` | 系统架构全景 | |
+| `docs/adr/` | 架构决策记录 | |
+| `memory/` | 当前进度、坑位记录 | |
+| `ai-sessions/` | AI 会话记录 | |
+| `.workbuddy/` | 历史工作会话记录 | 遗留 |
+
+## 我想知道 XX 该去哪看
+
+| 问题 | 位置 |
+|------|------|
+| 如何开始录制？ | `src/recorder.cpp:StartRecording()` |
+| 音频怎么抓取的？ | `src/wasapi_capture.cpp:InitLoopback()` |
+| 回声消除怎么工作的？ | `docs/aec.md` |
+| MP3 怎么编码的？ | `src/mp3_writer.cpp:Open()` |
+| 会议怎么检测的？ | `src/teams_watcher.cpp:MeetingActive()` |
+| 混音怎么做的？ | `src/audio_mixer.cpp` |
+| UI 窗口怎么创建的？ | `src/main.cpp:WndProc()` / `RecreateControls()` |
+| 多语言怎么加载的？ | `src/localization.cpp:LoadLangFile()` |
+| 日志写在哪？ | exe 同目录 `[exe名]-YYYYMM.log` |
+| 配置文件在哪？ | exe 同目录 `[exe名].ini` |
+| 录音文件放哪？ | exe 同目录 / App 子目录（Teams/WeChat/DingTalk/TencentMeeting/） |
+
+## 当前状态
+
+- 阶段：功能完整，可日常使用
+- 最近更新：v1.3 — 设备变更通知、开机自启、checkbox 状态持久化
+- 已知问题：README.md 中的 "## 版本 v1.3" 注释已过，无
+
+## Rust 版 Cargo.toml 版本号
+
+`src_rs/Cargo.toml` 中 `version = "1.0.0"` 与实际版本不一致，需更新为 v1.3。
+
+## 术语表
+
+| 术语 | 含义 |
+|------|------|
+| WASAPI | Windows Audio Session API，低延迟音频采集 |
+| Loopback | 录制播放设备输出（而非麦克风输入） |
+| MF / Media Foundation | Windows 内置多媒体框架，提供 MP3 编码器 |
+| AEC | Acoustic Echo Cancellation，回声消除 |
+| NLMS | Normalized Least Mean Square，自适应滤波算法 |
+| DTD | Double Talk Detection，双讲检测 |
+| PCM16 | 16-bit linear PCM 音频格式 |
+| CBR | Constant Bit Rate，固定码率 |
+| Sink Writer | Media Foundation 的编码+写入组件 |
+| COM | Component Object Model，Windows 组件模型 |
+| Teams Watcher | 通过音频会话枚举检测会议 App 的模块 |
