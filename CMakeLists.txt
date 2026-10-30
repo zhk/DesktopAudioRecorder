@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(desktop-audio-recorder VERSION 1.3.0 LANGUAGES CXX)
+project(desktop-audio-recorder VERSION 1.4.0 LANGUAGES CXX)
 
 # 独立的桌面音频录制小工具：
 #   WASAPI Loopback 采集 -> PCM16 -> Media Foundation MP3 编码

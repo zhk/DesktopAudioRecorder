@@ -1,6 +1,6 @@
 [package]
 name = "desktop-audio-recorder"
-version = "1.0.0"
+version = "1.4.0"
 edition = "2021"
 rust-version = "1.82"
 description = "桌面音频录制（Windows）：WASAPI Loopback + 麦克风混音 + Media Foundation MP3 编码"

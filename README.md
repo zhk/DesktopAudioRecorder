@@ -5,7 +5,7 @@ Windows 桌面音频录制工具，WASAPI Loopback + 麦克风混音，MP3 编�
 
 ## 版本
 
-v1.3 (C++) / v1.0.0 (Rust)
+v1.4 (C++) / v1.4.0 (Rust)
 
 ## 一句话简介
 

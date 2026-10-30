@@ -341,6 +341,7 @@ struct App {
     out_path: PathBuf,
     device_name: String,
     mic_name: String,
+    meeting_app: String,
 }
 
 impl App {
@@ -373,6 +374,7 @@ impl App {
             out_path: PathBuf::new(),
             device_name: String::new(),
             mic_name: String::new(),
+            meeting_app: String::new(),
         }
     }
 
@@ -749,7 +751,8 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
         // 用户手动停止了自动开始的录制 → 本次会议内抑制自动重开
         if self.auto_started {
             self.auto_started = false;
-            if button_checked(self.chk_auto_teams) && TeamsWatcher::meeting_active() {
+            let mut dummy = String::new();
+            if button_checked(self.chk_auto_teams) && TeamsWatcher::meeting_active(&mut dummy) {
                 self.auto_suppress = true;
             }
         }
@@ -773,9 +776,11 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
             return;
         }
 
-        if TeamsWatcher::meeting_active() {
+        let mut app = String::new();
+        if TeamsWatcher::meeting_active(&mut app) {
             self.inactive_polls = 0;
             if self.session.is_none() && !self.auto_suppress {
+                self.meeting_app = app.clone();
                 if self.start_recording(true).started {
                     self.auto_started = true;
                 } else {
@@ -1374,6 +1379,14 @@ pub fn run() -> i32 {
 
         // 让通用控件使用系统主题（主题清单由 build.rs 嵌入）
         load_config();
+        append_log("App started  v1.4");
+        let locale_snapshot = LOCALE.get().map(|s| s.as_str()).unwrap_or("?");
+        APP.with(|cell| {
+            let app = cell.borrow();
+            let s = format!("Config  lang={}  auto_teams={}  auto_start={}",
+                locale_snapshot, app.auto_teams_checked, app.auto_start_checked);
+            append_log(&s);
+        });
         let _com = ComApartment::sta();
         let icc = INITCOMMONCONTROLSEX {
             dwSize: size_of::<INITCOMMONCONTROLSEX>() as DWORD,

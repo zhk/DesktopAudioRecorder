@@ -387,6 +387,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd)
 
 	LoadConfig();
 
+	AppendLog(L"App started  v1.4");
+
+	wchar_t logBuf[256];
+	swprintf_s(logBuf, L"Config  lang=%s  auto_teams=%d  auto_start=%d",
+		   g_lang.c_str(), g_autoTeamsSaved, g_autoStartSaved);
+	AppendLog(logBuf);
+
 	WNDCLASSEXW wc{sizeof(wc)};
 	wc.lpfnWndProc = WndProc;
 	wc.hInstance = instance;

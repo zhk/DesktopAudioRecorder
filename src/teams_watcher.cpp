@@ -59,24 +59,35 @@ bool TeamsWatcher::MeetingActive(std::wstring &app)
 	if (FAILED(hr))
 		return false;
 
-	do
+	// 枚举所有活跃的播放设备，而非只查默认设备（蓝牙/USB 音频等可能是活跃但非默认）
+	IMMDeviceCollection *deviceCollection = nullptr;
+	if (FAILED(enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &deviceCollection)))
+	{
+		enumerator->Release();
+		return false;
+	}
+
+	UINT deviceCount = 0;
+	deviceCollection->GetCount(&deviceCount);
+
+	for (UINT d = 0; d < deviceCount && !active; ++d)
 	{
 		IMMDevice *device = nullptr;
-		if (FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device)))
-			break;
+		if (FAILED(deviceCollection->Item(d, &device)))
+			continue;
 
 		IAudioSessionManager2 *manager = nullptr;
 		hr = device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
 				      reinterpret_cast<void **>(&manager));
 		device->Release();
 		if (FAILED(hr))
-			break;
+			continue;
 
 		IAudioSessionEnumerator *sessionEnum = nullptr;
 		hr = manager->GetSessionEnumerator(&sessionEnum);
 		manager->Release();
 		if (FAILED(hr))
-			break;
+			continue;
 
 		int count = 0;
 		sessionEnum->GetCount(&count);
@@ -94,7 +105,8 @@ bool TeamsWatcher::MeetingActive(std::wstring &app)
 								  reinterpret_cast<void **>(&ctl2))))
 								  {
 					DWORD pid = 0;
-					if (SUCCEEDED(ctl2->GetProcessId(&pid)) && pid != 0 && IsMeetingProcess(pid, app))
+					if (SUCCEEDED(ctl2->GetProcessId(&pid)) && pid != 0
+					    && IsMeetingProcess(pid, app))
 						active = true;
 					ctl2->Release();
 				}
@@ -102,8 +114,9 @@ bool TeamsWatcher::MeetingActive(std::wstring &app)
 			ctl->Release();
 		}
 		sessionEnum->Release();
-	} while (false);
+	}
 
+	deviceCollection->Release();
 	enumerator->Release();
 	return active;
 }
