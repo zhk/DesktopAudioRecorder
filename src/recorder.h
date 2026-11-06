@@ -9,7 +9,7 @@
 #include "mp3_writer.h"
 #include "wasapi_capture.h"
 
-extern HWND g_hwnd, g_combo, g_comboMic, g_btnStart, g_btnRefresh, g_btnOpenFolder, g_status, g_chkAec, g_chkAutoTeams, g_recordCountText, g_chkAutoStart;
+extern HWND g_hwnd, g_combo, g_comboMic, g_btnStart, g_btnRefresh, g_btnOpenFolder, g_status, g_chkAec, g_chkAutoTeams, g_recordCountText, g_chkAutoStart, g_chkAutoSplit, g_comboSplit;
 extern int g_recordCount;
 extern std::vector<std::wstring> g_renderIds;
 extern std::vector<std::wstring> g_micIds;
@@ -36,3 +36,8 @@ void RefreshDevices();
 bool StartRecording(bool fromAuto);
 void StopRecording();
 void OnWatchTick();
+void FillSplitCombo();
+void SyncSplitFromControls();
+void MaybeSplitOutput();
+// 采集线程运行期错误：让 StopRecording 把它当“中断”写日志（编码器本身没出错时）
+void NoteRecordError(const std::wstring &msg);

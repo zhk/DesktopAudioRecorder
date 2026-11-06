@@ -29,6 +29,8 @@ constexpr int IDC_CHK_AEC = 1006;
 constexpr int IDC_CHK_AUTOTEAMS = 1007;
 constexpr int IDC_BTN_OPENFOLDER = 1008;
 constexpr int IDC_CHK_AUTOSTART = 1010;
+constexpr int IDC_COMBO_SPLIT = 1011;
+constexpr int IDC_CHK_AUTOSPLIT = 1012;
 constexpr UINT_PTR TIMER_ID = 1;
 constexpr UINT_PTR TIMER_WATCH = 2;
 constexpr UINT WM_RECORD_ERROR = WM_APP + 1;
@@ -147,16 +149,22 @@ void RecreateControls(HWND hwnd)
 	g_btnOpenFolder = make(L"BUTTON", S(L"UI", L"btn_open_folder"), 0, 220, 84, 100, 25, IDC_BTN_OPENFOLDER);
 	g_chkAutoStart = make(L"BUTTON", S(L"UI", L"chk_autostart"), BS_AUTOCHECKBOX, 326, 84, 120, 25, IDC_CHK_AUTOSTART);
 	Button_SetCheck(g_chkAutoStart, g_autoStartSaved ? BST_CHECKED : BST_UNCHECKED);
-	g_chkAec = make(L"BUTTON", S(L"UI", L"chk_aec"), BS_AUTOCHECKBOX, 12, 118, 160, 22, IDC_CHK_AEC);
+	g_chkAutoSplit = make(L"BUTTON", S(L"UI", L"chk_auto_split"), BS_AUTOCHECKBOX, 12, 118, 160, 22,
+			      IDC_CHK_AUTOSPLIT);
+	Button_SetCheck(g_chkAutoSplit, g_autoSplitSaved ? BST_CHECKED : BST_UNCHECKED);
+	g_comboSplit = make(L"COMBOBOX", L"", CBS_DROPDOWNLIST, 178, 116, 90, 120, IDC_COMBO_SPLIT);
+	FillSplitCombo();
+	SyncSplitFromControls();
+	g_chkAec = make(L"BUTTON", S(L"UI", L"chk_aec"), BS_AUTOCHECKBOX, 12, 146, 168, 22, IDC_CHK_AEC);
 	Button_SetCheck(g_chkAec, g_aecSaved ? BST_CHECKED : BST_UNCHECKED);
-	g_chkAutoTeams = make(L"BUTTON", S(L"UI", L"chk_auto_teams"), BS_AUTOCHECKBOX, 180, 118, 220, 22,
+	g_chkAutoTeams = make(L"BUTTON", S(L"UI", L"chk_auto_teams"), BS_AUTOCHECKBOX, 184, 146, 230, 22,
 			      IDC_CHK_AUTOTEAMS);
 	Button_SetCheck(g_chkAutoTeams, g_autoTeamsSaved ? BST_CHECKED : BST_UNCHECKED);
 
 	g_status = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
 				   WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL |
 					   WS_VSCROLL,
-				   12, 148, 496, 110, hwnd,
+				   12, 174, 496, 110, hwnd,
 				   reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_STATUS)),
 				   nullptr, nullptr);
 	SendMessageW(g_status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
@@ -195,6 +203,10 @@ void RecreateControls(HWND hwnd)
 			SetWindowTextW(g_btnStart, S(L"UI", L"btn_stop"));
 			EnableWindow(g_combo, FALSE);
 			EnableWindow(g_comboMic, FALSE);
+			EnableWindow(g_chkAec, FALSE);
+			EnableWindow(g_btnRefresh, FALSE);
+			EnableWindow(g_chkAutoSplit, FALSE);
+			EnableWindow(g_comboSplit, FALSE);
 		}
 		SetTimer(hwnd, TIMER_WATCH, 2000, nullptr);
 	}
@@ -208,6 +220,7 @@ void ReloadUI()
 	g_aecSaved = (g_chkAec && Button_GetCheck(g_chkAec) == BST_CHECKED);
 	g_autoTeamsSaved = (g_chkAutoTeams && Button_GetCheck(g_chkAutoTeams) == BST_CHECKED);
 	g_autoStartSaved = (g_chkAutoStart && Button_GetCheck(g_chkAutoStart) == BST_CHECKED);
+	SyncSplitFromControls();
 
 	KillTimer(hwnd, TIMER_WATCH);
 
@@ -218,7 +231,7 @@ void ReloadUI()
 		DestroyWindow(child);
 		child = next;
 	}
-	g_combo = g_comboMic = g_btnStart = g_btnRefresh = g_btnOpenFolder = g_status = g_chkAec = g_chkAutoTeams = g_recordCountText = nullptr;
+	g_combo = g_comboMic = g_btnStart = g_btnRefresh = g_btnOpenFolder = g_status = g_chkAec = g_chkAutoTeams = g_recordCountText = g_chkAutoStart = g_chkAutoSplit = g_comboSplit = nullptr;
 	RecreateControls(hwnd);
 }
 
@@ -270,6 +283,23 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			AppendLog(g_autoStartSaved ? L"Auto start ON" : L"Auto start OFF");
 			SetAutoStart(g_autoStartSaved);
 			SaveConfig();
+			return 0;
+		}
+		case IDC_CHK_AUTOSPLIT: {
+			SyncSplitFromControls();
+			AppendLog(g_autoSplitSaved ? L"Auto split ON" : L"Auto split OFF");
+			SaveConfig();
+			return 0;
+		}
+		case IDC_COMBO_SPLIT: {
+			if (HIWORD(wp) == CBN_SELCHANGE)
+			{
+				SyncSplitFromControls();
+				wchar_t buf[64];
+				swprintf_s(buf, L"Split interval: %d min", g_splitMinutesSaved);
+				AppendLog(buf);
+				SaveConfig();
+			}
 			return 0;
 		}
 		case IDC_BTN_OPENFOLDER:
@@ -332,7 +362,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		if (wp == TIMER_ID && g_recording)
 			ShowRecordingStatus();
 		else if (wp == TIMER_WATCH)
+		{
+			MaybeSplitOutput();
 			OnWatchTick();
+		}
 		return 0;
 
 	case WM_DEVICE_CHANGE:
@@ -347,8 +380,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	case WM_RECORD_ERROR:
 	{
 		std::unique_ptr<std::wstring> m(reinterpret_cast<std::wstring *>(lp));
+		NoteRecordError(*m);
 		if (g_recording)
 			StopRecording();
+		else
+			AppendLogLine(L"record error:  " + *m);
 		MessageBoxW(hwnd, m->c_str(), S(L"About", L"title"), MB_ICONERROR);
 		SetStatus(std::wstring(S(L"Status", L"start")) + L": " + g_startTime + L"\r\n" + S(L"Status", L"end") + L": " + Timestamp() + L"\r\n" + S(L"Status", L"interrupted") + L"：" + *m);
 		return 0;
@@ -390,8 +426,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd)
 	AppendLog(L"App started  v1.4");
 
 	wchar_t logBuf[256];
-	swprintf_s(logBuf, L"Config  lang=%s  auto_teams=%d  auto_start=%d",
-		   g_lang.c_str(), g_autoTeamsSaved, g_autoStartSaved);
+	swprintf_s(logBuf, L"Config  lang=%s  auto_teams=%d  auto_start=%d  auto_split=%d  split_minutes=%d",
+		   g_lang.c_str(), g_autoTeamsSaved, g_autoStartSaved, g_autoSplitSaved, g_splitMinutesSaved);
 	AppendLog(logBuf);
 
 	WNDCLASSEXW wc{sizeof(wc)};
@@ -407,7 +443,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd)
 						   LR_SHARED));
 	RegisterClassExW(&wc);
 
-	RECT rc{0, 0, 520, 280};
+	RECT rc{0, 0, 520, 306};
 	AdjustWindowRect(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
 	HWND hwnd = CreateWindowExW(0, wc.lpszClassName, S(L"UI", L"app_title"),
 				    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, CW_USEDEFAULT,

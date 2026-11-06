@@ -46,6 +46,24 @@ void AppendLog(const std::wstring &line)
 	}
 }
 
+void AppendLogLine(const std::wstring &line)
+{
+	std::wstring flat(line);
+	size_t p = 0;
+	while ((p = flat.find(L"\r\n", p)) != std::wstring::npos)
+	{
+		flat.replace(p, 2, L" | ");
+		p += 3;
+	}
+	p = 0;
+	while ((p = flat.find(L'\n', p)) != std::wstring::npos)
+	{
+		flat.replace(p, 1, L" | ");
+		p += 3;
+	}
+	AppendLog(flat);
+}
+
 std::wstring FormatDuration(ULONGLONG ms)
 {
 	const ULONGLONG s = ms / 1000;

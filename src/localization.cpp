@@ -3,6 +3,8 @@
 
 std::wstring g_lang;
 std::map<std::wstring, std::wstring> g_str;
+bool g_autoSplitSaved = false;
+int g_splitMinutesSaved = 60;
 
 const wchar_t *S(const wchar_t *section, const wchar_t *key)
 {
@@ -113,6 +115,12 @@ void LoadConfig()
 	g_autoTeamsSaved = (val[0] == L'1');
 	GetPrivateProfileStringW(L"Options", L"auto_start", L"0", val, 8, ini);
 	g_autoStartSaved = (val[0] == L'1');
+	GetPrivateProfileStringW(L"Options", L"auto_split", L"0", val, 8, ini);
+	g_autoSplitSaved = (val[0] == L'1');
+	wchar_t num[16]{};
+	GetPrivateProfileStringW(L"Options", L"split_minutes", L"60", num, 16, ini);
+	const int m = _wtoi(num);
+	g_splitMinutesSaved = (m == 15 || m == 30 || m == 60 || m == 90) ? m : 60;
 }
 
 void SaveConfig()
@@ -122,4 +130,8 @@ void SaveConfig()
 	WritePrivateProfileStringW(L"Language", L"locale", g_lang.c_str(), ini);
 	WritePrivateProfileStringW(L"Options", L"auto_teams", g_autoTeamsSaved ? L"1" : L"0", ini);
 	WritePrivateProfileStringW(L"Options", L"auto_start", g_autoStartSaved ? L"1" : L"0", ini);
+	WritePrivateProfileStringW(L"Options", L"auto_split", g_autoSplitSaved ? L"1" : L"0", ini);
+	wchar_t num[16]{};
+	swprintf_s(num, L"%d", g_splitMinutesSaved);
+	WritePrivateProfileStringW(L"Options", L"split_minutes", num, ini);
 }

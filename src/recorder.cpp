@@ -7,6 +7,7 @@
 #include <commctrl.h>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <string>
 #include <vector>
@@ -22,7 +23,11 @@ const PROPERTYKEY kPKeyDeviceFriendlyName = {{0xa45c254e, 0xdf1c, 0x4efd,
 constexpr uint32_t BITRATE = 192000;
 constexpr int WATCH_GRACE_POLLS = 5;
 
-HWND g_hwnd{}, g_combo{}, g_comboMic{}, g_btnStart{}, g_btnRefresh{}, g_btnOpenFolder{}, g_status{}, g_chkAec{}, g_chkAutoTeams{}, g_recordCountText{}, g_chkAutoStart{};
+// 自动分割的可选时长（分钟）与对应的语言文件 key，顺序即下拉框顺序
+constexpr int kSplitMinutes[4] = {15, 30, 60, 90};
+constexpr const wchar_t *kSplitKeys[4] = {L"split_15", L"split_30", L"split_60", L"split_90"};
+
+HWND g_hwnd{}, g_combo{}, g_comboMic{}, g_btnStart{}, g_btnRefresh{}, g_btnOpenFolder{}, g_status{}, g_chkAec{}, g_chkAutoTeams{}, g_recordCountText{}, g_chkAutoStart{}, g_chkAutoSplit{}, g_comboSplit{};
 int g_recordCount = 0;
 std::vector<std::wstring> g_renderIds;
 std::vector<std::wstring> g_micIds;
@@ -42,7 +47,51 @@ std::wstring g_deviceName;
 std::wstring g_micName;
 std::wstring g_meetingApp;
 
-std::wstring MakeOutputPath()
+// 当前生效的编码器：采集线程经 g_wmtx 取用，切换分段文件时原子替换。
+std::mutex g_wmtx;
+
+// 自动分割状态（仅 UI 线程访问）
+int g_splitMinutes = 0;
+std::wstring g_splitBase;
+int g_splitIndex = 0;
+ULONGLONG g_segStartTick = 0;
+uint32_t g_capRate = 0;
+uint16_t g_capChannels = 0;
+// 采集线程上报的运行期错误（编码器本身可能没出错），StopRecording 据此写“中断”日志
+std::wstring g_pendingError;
+
+void NoteRecordError(const std::wstring &msg)
+{
+	g_pendingError = msg;
+}
+
+void FillSplitCombo()
+{
+	ComboBox_ResetContent(g_comboSplit);
+	for (const wchar_t *key : kSplitKeys)
+		ComboBox_AddString(g_comboSplit, S(L"UI", key));
+	int idx = 2;
+	for (int i = 0; i < 4; ++i)
+	{
+		if (kSplitMinutes[i] == g_splitMinutesSaved)
+		{
+			idx = i;
+			break;
+		}
+	}
+	ComboBox_SetCurSel(g_comboSplit, idx);
+}
+
+// 把「自动分割录音文件」复选框 + 时长下拉框的当前状态同步到录制逻辑（每次开始录制都会调用）
+void SyncSplitFromControls()
+{
+	g_autoSplitSaved = (g_chkAutoSplit && Button_GetCheck(g_chkAutoSplit) == BST_CHECKED);
+	const int sel = ComboBox_GetCurSel(g_comboSplit);
+	g_splitMinutesSaved = (sel >= 0 && sel < 4) ? kSplitMinutes[sel] : 60;
+	g_splitMinutes = g_autoSplitSaved ? g_splitMinutesSaved : 0;
+}
+
+std::wstring MakeOutputBase()
 {
 	wchar_t exePath[MAX_PATH]{};
 	GetModuleFileNameW(nullptr, exePath, MAX_PATH);
@@ -57,7 +106,7 @@ std::wstring MakeOutputPath()
 	}
 
 	wchar_t name[256];
-	swprintf_s(name, L"%s-%04d%02d%02d-%02d%02d%02d.mp3", g_meetingApp.empty() ? L"recording" : g_meetingApp.c_str(),
+	swprintf_s(name, L"%s-%04d%02d%02d-%02d%02d%02d", g_meetingApp.empty() ? L"recording" : g_meetingApp.c_str(),
 		   st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 	return (dir / name).wstring();
 }
@@ -65,6 +114,44 @@ std::wstring MakeOutputPath()
 void SetStatus(const std::wstring &text)
 {
 	SetWindowTextW(g_status, text.c_str());
+}
+
+// 到达分割时限时切换输出文件：先打开新文件，成功后原子换掉采集线程正在写的编码器，
+// 再冲刷并关闭旧文件。采集线程不受影响（切换期间最多丢一个 10ms 缓冲块）。
+void MaybeSplitOutput()
+{
+	if (!g_recording || g_splitMinutes <= 0 || !g_writer)
+		return;
+	if (GetTickCount64() - g_segStartTick < static_cast<ULONGLONG>(g_splitMinutes) * 60000ULL)
+		return;
+
+	const std::wstring newPath = g_splitBase + L"_" + std::to_wstring(g_splitIndex + 1) + L".mp3";
+	std::wstring err;
+	auto next = std::make_unique<Mp3Writer>();
+	if (!next->Open(newPath, g_capRate, g_capChannels, BITRATE, err))
+	{
+		AppendLog(L"split failed, splitting disabled for this recording: " + err);
+		g_splitMinutes = 0;
+		return;
+	}
+
+	std::unique_ptr<Mp3Writer> prev;
+	{
+		std::lock_guard<std::mutex> lk(g_wmtx);
+		prev.swap(g_writer);
+		g_writer = std::move(next);
+	}
+	if (prev)
+	{
+		if (prev->HasError())
+			AppendLog(L"segment interrupted: " + prev->Error() + L"  file: " + g_outPath);
+		prev->Close();
+	}
+
+	++g_splitIndex;
+	g_outPath = newPath;
+	g_segStartTick = GetTickCount64();
+	AppendLog(L"split to next segment  file: " + g_outPath);
 }
 
 void FillDeviceCombo(HWND combo, std::vector<std::wstring> &ids, EDataFlow flow, bool addNone)
@@ -175,11 +262,14 @@ void ShowRecordingStatus()
 
 bool StartRecording(bool fromAuto)
 {
+	SyncSplitFromControls();
+	g_pendingError.clear();
 	if (!fromAuto)
 		g_meetingApp.clear();
 
 	auto fail = [&](const std::wstring &msg)
 	{
+		AppendLogLine(L"start failed:  " + msg);
 		if (fromAuto)
 			SetStatus(msg);
 		else
@@ -190,6 +280,7 @@ bool StartRecording(bool fromAuto)
 	const int sel = ComboBox_GetCurSel(g_combo);
 	if (sel < 0 || static_cast<size_t>(sel) >= g_renderIds.size())
 	{
+		AppendLogLine(L"start failed:  " + std::wstring(S(L"Status", L"error_no_device")));
 		if (!fromAuto)
 			MessageBoxW(g_hwnd, S(L"Status", L"error_no_device"), S(L"UI", L"app_title"), MB_ICONINFORMATION);
 		return false;
@@ -222,7 +313,9 @@ bool StartRecording(bool fromAuto)
 
 	auto mixer = std::make_unique<AudioMixer>();
 	auto writer = std::make_unique<Mp3Writer>();
-	g_outPath = MakeOutputPath();
+	g_splitBase = MakeOutputBase();
+	g_splitIndex = 0;
+	g_outPath = g_splitBase + L".mp3";
 	if (!writer->Open(g_outPath, capture->SampleRate(), capture->Channels(), BITRATE, err))
 	{
 		if (micCap)
@@ -231,9 +324,20 @@ bool StartRecording(bool fromAuto)
 		return fail(std::wstring(S(L"Status", L"error_mp3")) + L"\r\n" + err + L"\r\n（" + S(L"Status", L"error_mp3_hint") + L"）");
 	}
 
-	Mp3Writer *w = writer.get();
-	mixer->Open(capture->SampleRate(), capture->Channels(),
-		    [w](const int16_t *d, uint32_t f) { w->Push(d, f); });
+	g_capRate = capture->SampleRate();
+	g_capChannels = capture->Channels();
+	{
+		std::lock_guard<std::mutex> lk(g_wmtx);
+		g_writer = std::move(writer);
+	}
+
+	mixer->Open(g_capRate, g_capChannels,
+		    [](const int16_t *d, uint32_t f)
+		    {
+			    std::lock_guard<std::mutex> lk(g_wmtx);
+			    if (g_writer)
+				    g_writer->Push(d, f);
+		    });
 	mixer->SetEchoCancellation(Button_GetCheck(g_chkAec) == BST_CHECKED);
 	if (micCap)
 		mixer->SetMicFormat(micCap->SampleRate(), micCap->Channels());
@@ -251,17 +355,21 @@ bool StartRecording(bool fromAuto)
 	g_capture = std::move(capture);
 	g_micCap = std::move(micCap);
 	g_mixer = std::move(mixer);
-	g_writer = std::move(writer);
 	g_recording = true;
 	g_startTick = GetTickCount64();
+	g_segStartTick = g_startTick;
 	g_startTime = Timestamp();
 	AppendLog(L"Start  device: " + g_deviceName + L"  mic: " + g_micName + L"  file: " + g_outPath);
+	if (g_splitMinutes > 0)
+		AppendLog(L"auto split every " + std::to_wstring(g_splitMinutes) + L" min");
 
 	SetWindowTextW(g_btnStart, S(L"UI", L"btn_stop"));
 	EnableWindow(g_combo, FALSE);
 	EnableWindow(g_comboMic, FALSE);
 	EnableWindow(g_chkAec, FALSE);
 	EnableWindow(g_btnRefresh, FALSE);
+	EnableWindow(g_chkAutoSplit, FALSE);
+	EnableWindow(g_comboSplit, FALSE);
 	ShowRecordingStatus();
 	return true;
 }
@@ -277,14 +385,21 @@ void StopRecording()
 	if (g_micCap)
 		g_micCap->Stop();
 	g_capture->Stop();
-	g_writer->Close();
+	std::unique_ptr<Mp3Writer> writer;
+	{
+		std::lock_guard<std::mutex> lk(g_wmtx);
+		writer.swap(g_writer);
+	}
+	writer->Close();
 	SetCursor(old);
 
 	std::wstring endTime = Timestamp();
+	const bool failed = writer->HasError() || !g_pendingError.empty();
+	const std::wstring errText = writer->HasError() ? writer->Error() : g_pendingError;
 	std::wstring status;
-	if (g_writer->HasError())
+	if (failed)
 	{
-		status = std::wstring(S(L"Status", L"start")) + L": " + g_startTime + L"\r\n" + S(L"Status", L"end") + L": " + endTime + L"\r\n" + S(L"Status", L"interrupted") + L"：" + g_writer->Error();
+		status = std::wstring(S(L"Status", L"start")) + L": " + g_startTime + L"\r\n" + S(L"Status", L"end") + L": " + endTime + L"\r\n" + S(L"Status", L"interrupted") + L"：" + errText;
 		if (std::filesystem::exists(g_outPath))
 			status += L"\r\n" + std::wstring(S(L"Status", L"file")) + L": " + g_outPath;
 	}
@@ -304,9 +419,11 @@ void StopRecording()
 			 FormatDuration(GetTickCount64() - g_startTick) + L"  " + S(L"Status", L"size") + L" " + size + L"\r\n" + S(L"Status", L"file") + L": " + g_outPath;
 	}
 	SetStatus(status);
-	AppendLog(g_writer->HasError()
-		  ? std::wstring(L"interrupted: ") + g_writer->Error() + L"  file: " + g_outPath
-		  : std::wstring(L"completed  duration ") + FormatDuration(GetTickCount64() - g_startTick) + L"  file: " + g_outPath);
+	AppendLogLine(failed ? std::wstring(L"interrupted: ") + errText + L"  file: " + g_outPath
+			     : std::wstring(L"completed  duration ") + FormatDuration(GetTickCount64() - g_startTick) + L"  file: " + g_outPath);
+	g_pendingError.clear();
+	if (g_splitIndex > 0)
+		AppendLog(L"auto split wrote " + std::to_wstring(g_splitIndex + 1) + L" files");
 
 	if (g_autoStarted)
 	{
@@ -330,6 +447,8 @@ void StopRecording()
 	EnableWindow(g_comboMic, TRUE);
 	EnableWindow(g_chkAec, TRUE);
 	EnableWindow(g_btnRefresh, TRUE);
+	EnableWindow(g_chkAutoSplit, TRUE);
+	EnableWindow(g_comboSplit, TRUE);
 }
 
 void OnWatchTick()

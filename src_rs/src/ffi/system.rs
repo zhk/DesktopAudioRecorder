@@ -197,6 +197,8 @@ pub const CB_GETCURSEL: UINT = 0x0147;
 pub const CB_RESETCONTENT: UINT = 0x014B;
 /// `CB_SETCURSEL`
 pub const CB_SETCURSEL: UINT = 0x014E;
+/// 下拉框通知码：`CBN_SELCHANGE`（在 `WM_COMMAND` 的 `wParam` 高位）
+pub const CBN_SELCHANGE: UINT = 0x0001;
 
 // 窗口消息
 pub const WM_CREATE: UINT = 0x0001;

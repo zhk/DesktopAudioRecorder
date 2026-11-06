@@ -15,7 +15,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use core::ptr::{null, null_mut};
 
@@ -31,7 +31,7 @@ GetSystemMenu, GetSystemMetrics, GetTickCount64, GetUserDefaultUILanguage, GetWi
     ShowWindow, TrackPopupMenu, TranslateMessage, UpdateWindow, RegCreateKeyExW, RegSetValueExW,
     RegDeleteValueW, RegCloseKey, WritePrivateProfileStringW, BM_GETCHECK, BM_SETCHECK,
     BS_AUTOCHECKBOX, BST_CHECKED, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL,
-    CBS_DROPDOWNLIST, COLOR_BTNFACE, CW_USEDEFAULT, DEFAULT_GUI_FONT, ES_AUTOVSCROLL, ES_MULTILINE,
+    CBS_DROPDOWNLIST, CBN_SELCHANGE, COLOR_BTNFACE, CW_USEDEFAULT, DEFAULT_GUI_FONT, ES_AUTOVSCROLL, ES_MULTILINE,
     ES_READONLY, ICC_STANDARD_CLASSES, IDC_ARROW, IDC_WAIT, IMAGE_ICON, INITCOMMONCONTROLSEX, GW_CHILD, GW_HWNDNEXT,
     HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, ERROR_SUCCESS,
     LR_DEFAULTSIZE, LR_SHARED, MAX_PATH, MB_OK, MB_ICONERROR, MB_ICONINFORMATION, MF_BYPOSITION,
@@ -69,6 +69,8 @@ const IDC_CHK_AEC: i32 = 1006;
 const IDC_CHK_AUTOTEAMS: i32 = 1007;
 const IDC_BTN_OPENFOLDER: i32 = 1008;
 const IDC_CHK_AUTOSTART: i32 = 1010;
+const IDC_COMBO_SPLIT: i32 = 1011;
+const IDC_CHK_AUTOSPLIT: i32 = 1012;
 
 const TIMER_ID: usize = 1;
 const TIMER_WATCH: usize = 2;
@@ -85,6 +87,10 @@ const IDM_LANG_ENUS: usize = 3003;
 const BITRATE: u32 = 192_000;
 /// 会议结束防抖：连续 5 次未检测到才停录（2s × 5 = 10s）
 const WATCH_GRACE_POLLS: u32 = 5;
+/// 自动分割的可选时长（分钟），顺序即下拉框顺序
+const SPLIT_MINUTES: [u32; 4] = [15, 30, 60, 90];
+/// 上述时长对应的语言文件 key
+const SPLIT_KEYS: [&str; 4] = ["split_15", "split_30", "split_60", "split_90"];
 /// `resource.h` 里的 `IDI_APP`
 const IDI_APP: u16 = 101;
 
@@ -176,7 +182,10 @@ fn load_config() {
     let opts_wide = crate::util::to_wide("Options");
     let kt_wide = crate::util::to_wide("auto_teams");
     let ks_wide = crate::util::to_wide("auto_start");
+    let ksp_wide = crate::util::to_wide("auto_split");
+    let km_wide = crate::util::to_wide("split_minutes");
     let zero_wide = crate::util::to_wide("0");
+    let minutes_default_wide = crate::util::to_wide("60");
     unsafe {
         GetPrivateProfileStringW(sec_wide.as_ptr(), key_wide.as_ptr(), default_wide.as_ptr(), buf.as_mut_ptr(), 16, ini_wide.as_ptr());
     }
@@ -196,10 +205,22 @@ fn load_config() {
         GetPrivateProfileStringW(opts_wide.as_ptr(), ks_wide.as_ptr(), zero_wide.as_ptr(), buf.as_mut_ptr(), 8, ini_wide.as_ptr());
     }
     let auto_start = buf[0] == '1' as u16;
+    unsafe {
+        GetPrivateProfileStringW(opts_wide.as_ptr(), ksp_wide.as_ptr(), zero_wide.as_ptr(), buf.as_mut_ptr(), 8, ini_wide.as_ptr());
+    }
+    let auto_split = buf[0] == '1' as u16;
+    let mut num = [0u16; 16];
+    unsafe {
+        GetPrivateProfileStringW(opts_wide.as_ptr(), km_wide.as_ptr(), minutes_default_wide.as_ptr(), num.as_mut_ptr(), 16, ini_wide.as_ptr());
+    }
+    let parsed: u32 = crate::util::from_wide(&num).trim().parse().unwrap_or(60);
+    let minutes = if SPLIT_MINUTES.contains(&parsed) { parsed } else { 60 };
     APP.with(|cell| {
         let mut app = cell.borrow_mut();
         app.auto_teams_checked = auto_teams;
         app.auto_start_checked = auto_start;
+        app.auto_split_checked = auto_split;
+        app.split_minutes = minutes;
     });
 }
 
@@ -217,10 +238,16 @@ fn save_config(locale: &str) {
         let opts = crate::util::to_wide("Options");
         let k1 = crate::util::to_wide("auto_teams");
         let k2 = crate::util::to_wide("auto_start");
+        let k3 = crate::util::to_wide("auto_split");
+        let k4 = crate::util::to_wide("split_minutes");
         let v1 = crate::util::to_wide(if APP.with(|c| c.borrow().auto_teams_checked) { "1" } else { "0" });
         let v2 = crate::util::to_wide(if APP.with(|c| c.borrow().auto_start_checked) { "1" } else { "0" });
+        let v3 = crate::util::to_wide(if APP.with(|c| c.borrow().auto_split_checked) { "1" } else { "0" });
+        let v4 = crate::util::to_wide(&APP.with(|c| c.borrow().split_minutes).to_string());
         WritePrivateProfileStringW(opts.as_ptr(), k1.as_ptr(), v1.as_ptr(), ini_wide.as_ptr());
         WritePrivateProfileStringW(opts.as_ptr(), k2.as_ptr(), v2.as_ptr(), ini_wide.as_ptr());
+        WritePrivateProfileStringW(opts.as_ptr(), k3.as_ptr(), v3.as_ptr(), ini_wide.as_ptr());
+        WritePrivateProfileStringW(opts.as_ptr(), k4.as_ptr(), v4.as_ptr(), ini_wide.as_ptr());
     }
 }
 
@@ -273,11 +300,45 @@ impl PendingMessage {
 // 一次录制会话
 // ---------------------------------------------------------------------------
 
+/// 采集线程可见的编码器槽位：自动分割时原子替换，采集线程不重启。
+#[derive(Clone)]
+struct WriterSlot(Arc<Mutex<Option<Arc<Mp3Writer>>>>);
+
+impl WriterSlot {
+    fn new(writer: Arc<Mp3Writer>) -> Self {
+        Self(Arc::new(Mutex::new(Some(writer))))
+    }
+
+    fn push(&self, data: &[i16]) {
+        // 与 C++ 版 `g_wmtx` 临界区对应：锁内只做出队引用 + 入队
+        if let Some(writer) = self.0.lock().unwrap().as_ref() {
+            writer.push(data);
+        }
+    }
+
+    fn replace(&self, writer: Arc<Mp3Writer>) -> Option<Arc<Mp3Writer>> {
+        self.0.lock().unwrap().replace(writer)
+    }
+
+    fn clear(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+}
+
 struct Session {
     desktop: WasapiCapture,
     mic: Option<WasapiCapture>,
     mixer: Arc<AudioMixer>,
+    slot: WriterSlot,
     writer: Arc<Mp3Writer>,
+    rate: u32,
+    channels: u16,
+    /// 自动分割：文件名主干（不含扩展名）、已分割段数、本段起始时刻
+    split_base: PathBuf,
+    split_index: u32,
+    seg_start_tick: u64,
+    /// 本次录制生效的分割时长（分钟，0 = 不分割）；打开新分段失败时置 0
+    split_minutes: u32,
 }
 
 impl Session {
@@ -287,6 +348,7 @@ impl Session {
             mic.stop();
         }
         self.desktop.stop();
+        self.slot.clear();
         self.writer.close();
         // 混音器持有编码器的回调（Arc），先丢掉混音器再读编码器状态，
         // 保证读到的是一致的结果（与 C++ 版 reset 顺序一致）。
@@ -319,9 +381,13 @@ struct App {
     chk_aec: HWND,
     chk_auto_teams: HWND,
     chk_auto_start: HWND,
+    chk_auto_split: HWND,
+    combo_split: HWND,
     aec_checked: bool,
     auto_teams_checked: bool,
     auto_start_checked: bool,
+    auto_split_checked: bool,
+    split_minutes: u32,
 
     /// 与播放下拉框索引一一对应
     render_ids: Vec<Vec<u16>>,
@@ -336,6 +402,8 @@ struct App {
     auto_suppress: bool,
     /// 会议结束防抖计数
     inactive_polls: u32,
+    /// 采集线程上报的运行期错误：编码器本身没出错时，stop_recording 据此按“中断”记录
+    pending_error: Option<String>,
     start_tick: u64,
     start_time: String,
     out_path: PathBuf,
@@ -359,9 +427,13 @@ impl App {
             chk_aec: null_mut(),
             chk_auto_teams: null_mut(),
             chk_auto_start: null_mut(),
+            chk_auto_split: null_mut(),
+            combo_split: null_mut(),
             aec_checked: true,
             auto_teams_checked: false,
             auto_start_checked: false,
+            auto_split_checked: false,
+            split_minutes: 60,
             render_ids: Vec::new(),
             mic_ids: Vec::new(),
             session: None,
@@ -369,6 +441,7 @@ impl App {
             auto_started: false,
             auto_suppress: false,
             inactive_polls: 0,
+            pending_error: None,
             start_tick: 0,
             start_time: String::new(),
             out_path: PathBuf::new(),
@@ -442,13 +515,27 @@ impl App {
             self.btn_open_folder = make("BUTTON", tr("UI", "btn_open_folder"), 0, 220, 84, 100, 25, IDC_BTN_OPENFOLDER);
             self.chk_auto_start = make("BUTTON", tr("UI", "chk_autostart"), BS_AUTOCHECKBOX, 326, 84, 120, 25, IDC_CHK_AUTOSTART);
             button_set_check(self.chk_auto_start, self.auto_start_checked);
+            self.chk_auto_split = make(
+                "BUTTON",
+                tr("UI", "chk_auto_split"),
+                BS_AUTOCHECKBOX,
+                12,
+                118,
+                160,
+                22,
+                IDC_CHK_AUTOSPLIT,
+            );
+            button_set_check(self.chk_auto_split, self.auto_split_checked);
+            self.combo_split =
+                make("COMBOBOX", "", CBS_DROPDOWNLIST, 178, 116, 90, 120, IDC_COMBO_SPLIT);
+            self.fill_split_combo();
             self.chk_aec = make(
                 "BUTTON",
                 tr("UI", "chk_aec"),
                 BS_AUTOCHECKBOX,
                 12,
-                118,
-                160,
+                146,
+                168,
                 22,
                 IDC_CHK_AEC,
             );
@@ -457,9 +544,9 @@ impl App {
                 "BUTTON",
                 tr("UI", "chk_auto_teams"),
                 BS_AUTOCHECKBOX,
-                180,
-                118,
-                220,
+                184,
+                146,
+                230,
                 22,
                 IDC_CHK_AUTOTEAMS,
             );
@@ -473,7 +560,7 @@ impl App {
                 empty.as_ptr(),
                 WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
                 12,
-                148,
+                174,
                 496,
                 110,
                 hwnd,
@@ -548,8 +635,29 @@ impl App {
                 self.set_status(tr("Status", "auto_teams_on"));
             }
         } else {
-            append_log("Teams monitor OFF");
+            append_log("Meeting monitor OFF");
         }
+    }
+
+    /// 填充「自动分割录音文件」时长下拉框，并选中当前保存的时长。
+    fn fill_split_combo(&mut self) {
+        unsafe { SendMessageW(self.combo_split, CB_RESETCONTENT, 0, 0) };
+        for key in SPLIT_KEYS {
+            combo_add_string(self.combo_split, tr("UI", key));
+        }
+        let idx = SPLIT_MINUTES.iter().position(|m| *m == self.split_minutes).unwrap_or(2);
+        combo_set_cur_sel(self.combo_split, idx as i32);
+    }
+
+    /// 把「自动分割录音文件」复选框 + 时长下拉框的当前状态同步到录制逻辑（每次开始录制都会调用）
+    fn sync_split_from_controls(&mut self) {
+        self.auto_split_checked = !self.chk_auto_split.is_null() && button_checked(self.chk_auto_split);
+        let sel = combo_cur_sel(self.combo_split);
+        self.split_minutes = if sel >= 0 && (sel as usize) < SPLIT_MINUTES.len() {
+            SPLIT_MINUTES[sel as usize]
+        } else {
+            60
+        };
     }
 
     // ---- 录制 ----
@@ -575,6 +683,7 @@ impl App {
 
     /// 失败处理：自动模式下只写状态栏（看门狗场景避免反复弹窗），否则返回消息框。
     fn fail(&mut self, from_auto: bool, msg: String) -> Option<PendingMessage> {
+        append_log(&format!("start failed:  {}", one_line(&msg)));
         if from_auto {
             self.set_status(&msg);
             None
@@ -589,8 +698,14 @@ impl App {
     }
 
     fn start_recording(&mut self, from_auto: bool) -> StartOutcome {
+        self.sync_split_from_controls();
+        self.pending_error = None;
+        if !from_auto {
+            self.meeting_app.clear();
+        }
         let sel = combo_cur_sel(self.combo);
 if sel < 0 || sel as usize >= self.render_ids.len() {
+            append_log(&format!("start failed:  {}", tr("Status", "error_no_device")));
             return StartOutcome {
                 started: false,
                 message: if from_auto {
@@ -632,7 +747,8 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
         // 3) 混音器 + 编码器（输出格式跟随桌面流）
         let rate = desktop.sample_rate();
         let channels = desktop.channels();
-        self.out_path = make_output_path();
+        let base = make_output_base(&self.meeting_app);
+        self.out_path = base.clone().with_extension("mp3");
 
         let writer = match Mp3Writer::open(&self.out_path, rate, channels, BITRATE) {
             Ok(w) => Arc::new(w),
@@ -649,12 +765,13 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
         };
 
         let mixer = Arc::new(AudioMixer::new());
+        let slot = WriterSlot::new(Arc::clone(&writer));
         {
-            let writer_for_mix = Arc::clone(&writer);
+            let slot_for_mix = slot.clone();
             mixer.open(
                 rate,
                 channels,
-                Box::new(move |data: &[i16]| writer_for_mix.push(data)),
+                Box::new(move |data: &[i16]| slot_for_mix.push(data)),
             );
         }
         mixer.set_echo_cancellation(button_checked(self.chk_aec));
@@ -680,10 +797,27 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
             );
         }
 
-        self.session = Some(Session { desktop, mic, mixer, writer });
-        self.start_tick = unsafe { GetTickCount64() };
+        let now = unsafe { GetTickCount64() };
+        self.start_tick = now;
+        let split_runtime = if self.auto_split_checked { self.split_minutes } else { 0 };
+        self.session = Some(Session {
+            desktop,
+            mic,
+            mixer,
+            slot,
+            writer,
+            rate,
+            channels,
+            split_base: base,
+            split_index: 0,
+            seg_start_tick: now,
+            split_minutes: split_runtime,
+        });
         self.start_time = timestamp();
         append_log(&format!("Start  device: {}  mic: {}  file: {}", self.device_name, self.mic_name, self.out_path.display()));
+        if self.auto_split_checked {
+            append_log(&format!("auto split every {} min", self.split_minutes));
+        }
         unsafe { SetTimer(self.hwnd, TIMER_ID, 500, null_mut()) };
 
         set_window_text(self.btn_start, tr("UI", "btn_stop"));
@@ -692,6 +826,8 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
             EnableWindow(self.combo_mic, FALSE);
             EnableWindow(self.chk_aec, FALSE);
             EnableWindow(self.btn_refresh, FALSE);
+            EnableWindow(self.chk_auto_split, FALSE);
+            EnableWindow(self.combo_split, FALSE);
         }
         self.show_recording_status();
 
@@ -705,7 +841,14 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
         unsafe { KillTimer(self.hwnd, TIMER_ID) };
 
         let old_cursor = unsafe { SetCursor(LoadCursorW(null_mut(), IDC_WAIT as usize as LPCWSTR)) };
-        let (has_error, error) = session.stop();
+        let split_index = session.split_index;
+        let (mut has_error, mut error) = session.stop();
+        if !has_error {
+            if let Some(e) = self.pending_error.take() {
+                has_error = true;
+                error = e;
+            }
+        }
         unsafe { SetCursor(old_cursor) };
 
         let end_time = timestamp();
@@ -747,6 +890,9 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
             format!("{}  {}  {}: {}", tr("Status", "completed"), format_duration(elapsed), tr("Status", "file"), self.out_path.display())
         };
         append_log(&log_line);
+        if split_index > 0 {
+            append_log(&format!("auto split wrote {} files", split_index + 1));
+        }
 
         // 用户手动停止了自动开始的录制 → 本次会议内抑制自动重开
         if self.auto_started {
@@ -766,6 +912,8 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
             EnableWindow(self.combo_mic, TRUE);
             EnableWindow(self.chk_aec, TRUE);
             EnableWindow(self.btn_refresh, TRUE);
+            EnableWindow(self.chk_auto_split, TRUE);
+            EnableWindow(self.combo_split, TRUE);
         }
     }
 
@@ -803,6 +951,56 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
                 self.inactive_polls = 0;
             }
         }
+    }
+
+    /// 到达分割时限时切换输出文件：先打开新文件，成功后原子换掉采集线程正在写的编码器，
+    /// 再冲刷并关闭旧文件。采集线程不受影响（与 C++ 版 `MaybeSplitOutput` 对应）。
+    fn maybe_split_output(&mut self) {
+        let session = match self.session.as_ref() {
+            Some(s) => s,
+            None => return,
+        };
+        if session.split_minutes == 0 {
+            return;
+        }
+        let now = unsafe { GetTickCount64() };
+        if now - session.seg_start_tick < session.split_minutes as u64 * 60_000 {
+            return;
+        }
+        let base = session.split_base.clone();
+        let index = session.split_index;
+        let rate = session.rate;
+        let channels = session.channels;
+
+        let file = match base.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => return,
+        };
+        let dir = base.parent().map(Path::to_path_buf).unwrap_or_default();
+        let new_path = dir.join(format!("{}_{}.mp3", file, index + 1));
+
+        let new_writer = match Mp3Writer::open(&new_path, rate, channels, BITRATE) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                append_log(&format!("split failed, splitting disabled for this recording: {e}"));
+                if let Some(s) = self.session.as_mut() {
+                    s.split_minutes = 0;
+                }
+                return;
+            }
+        };
+
+        let session = self.session.as_mut().unwrap();
+        session.slot.replace(Arc::clone(&new_writer));
+        let old_writer = std::mem::replace(&mut session.writer, new_writer);
+        session.split_index = index + 1;
+        session.seg_start_tick = unsafe { GetTickCount64() };
+        if old_writer.has_error() {
+            append_log(&format!("segment interrupted: {}  file: {}", old_writer.error(), self.out_path.display()));
+        }
+        old_writer.close();
+        self.out_path = new_path.clone();
+        append_log(&format!("split to next segment  file: {}", new_path.display()));
     }
 
     // ---- 系统托盘 ----
@@ -1051,20 +1249,27 @@ unsafe fn fill_device_combo(
     (ids, status)
 }
 
-/// 输出文件路径：程序所在目录 + `recording-YYYYMMDD-HHMMSS.mp3`。
-fn make_output_path() -> PathBuf {
+/// 输出文件名主干（不含扩展名）：程序所在目录 [+ 会议 App 子目录] + `名字-YYYYMMDD-HHMMSS`。
+/// 与 C++ 版 `MakeOutputBase` 对应：会议自动录制时按 App 建子目录并用 App 名做前缀。
+fn make_output_base(meeting_app: &str) -> PathBuf {
     let mut exe_path = [0u16; MAX_PATH];
-    let dir = unsafe {
+    let mut dir = unsafe {
         let len = GetModuleFileNameW(null_mut(), exe_path.as_mut_ptr(), MAX_PATH as DWORD);
         let exe = PathBuf::from(from_wide(&exe_path[..len as usize]));
         exe.parent().map(Path::to_path_buf).unwrap_or_default()
     };
 
+    let prefix = if meeting_app.is_empty() { "recording" } else { meeting_app };
+    if !meeting_app.is_empty() {
+        dir = dir.join(meeting_app);
+        let _ = std::fs::create_dir_all(&dir);
+    }
+
     let mut st = SYSTEMTIME::default();
     unsafe { GetLocalTime(&mut st) };
     let name = format!(
-        "recording-{:04}{:02}{:02}-{:02}{:02}{:02}.mp3",
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
+        "{}-{:04}{:02}{:02}-{:02}{:02}{:02}",
+        prefix, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
     );
     dir.join(name)
 }
@@ -1097,6 +1302,11 @@ fn set_auto_start(on: bool) {
             RegCloseKey(hkey);
         }
     }
+}
+
+/// 把多行文本压成单行，便于写日志（失败信息常含 \r\n）
+fn one_line(text: &str) -> String {
+    text.replace("\r\n", " | ").replace('\n', " | ")
 }
 
 fn append_log(line: &str) {
@@ -1215,6 +1425,20 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
                         save_config(LOCALE.get().map(|s| s.as_str()).unwrap_or("en-US"));
                         None
                     }
+                    IDC_CHK_AUTOSPLIT => {
+                        app.sync_split_from_controls();
+                        append_log(if app.auto_split_checked { "Auto split ON" } else { "Auto split OFF" });
+                        save_config(LOCALE.get().map(|s| s.as_str()).unwrap_or("en-US"));
+                        None
+                    }
+                    IDC_COMBO_SPLIT => {
+                        if ((wp >> 16) & 0xFFFF) as DWORD == CBN_SELCHANGE {
+                            app.sync_split_from_controls();
+                            append_log(&format!("Split interval: {} min", app.split_minutes));
+                            save_config(LOCALE.get().map(|s| s.as_str()).unwrap_or("en-US"));
+                        }
+                        None
+                    }
                     IDC_BTN_OPENFOLDER => {
                         drop(app);
                         let mut exe_path = [0u16; MAX_PATH];
@@ -1271,6 +1495,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
                     app.aec_checked = button_checked(app.chk_aec);
                     app.auto_teams_checked = button_checked(app.chk_auto_teams);
                     app.auto_start_checked = button_checked(app.chk_auto_start);
+                    app.sync_split_from_controls();
                     unsafe {
                         KillTimer(app.hwnd, TIMER_WATCH);
                         // Destroy all child windows manually (avoid EnumChildWindows skip bug)
@@ -1289,6 +1514,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
                         app.status = null_mut();
                         app.chk_aec = null_mut();
                         app.chk_auto_teams = null_mut();
+                        app.chk_auto_start = null_mut();
+                        app.chk_auto_split = null_mut();
+                        app.combo_split = null_mut();
                         app.recreate_controls(hwnd);
                         app.refresh_devices();
                         SetTimer(hwnd, TIMER_WATCH, 2000, null_mut());
@@ -1318,7 +1546,8 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
                     }
                 });
             } else if wp == TIMER_WATCH {
-                // 自动模式下失败只写状态栏，不会弹窗
+                // 先检查自动分割，再看门狗（自动模式下失败只写状态栏，不会弹窗）
+                APP.with(|cell| cell.borrow_mut().maybe_split_output());
                 APP.with(|cell| cell.borrow_mut().on_watch_tick());
             }
             0
@@ -1330,7 +1559,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
                 if app.session.is_some() {
+                    app.pending_error = Some(message.clone());
                     app.stop_recording();
+                } else {
+                    append_log(&format!("record error:  {}", one_line(&message)));
                 }
             });
             let ts = timestamp();
@@ -1383,8 +1615,9 @@ pub fn run() -> i32 {
         let locale_snapshot = LOCALE.get().map(|s| s.as_str()).unwrap_or("?");
         APP.with(|cell| {
             let app = cell.borrow();
-            let s = format!("Config  lang={}  auto_teams={}  auto_start={}",
-                locale_snapshot, app.auto_teams_checked, app.auto_start_checked);
+            let s = format!("Config  lang={}  auto_teams={}  auto_start={}  auto_split={}  split_minutes={}",
+                locale_snapshot, app.auto_teams_checked, app.auto_start_checked,
+                app.auto_split_checked, app.split_minutes);
             append_log(&s);
         });
         let _com = ComApartment::sta();
@@ -1427,7 +1660,7 @@ pub fn run() -> i32 {
         RegisterClassExW(&window_class);
 
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-        let mut rect = RECT { left: 0, top: 0, right: 520, bottom: 280 };
+        let mut rect = RECT { left: 0, top: 0, right: 520, bottom: 306 };
         AdjustWindowRect(&mut rect, style, FALSE);
 
         let title = to_wide(tr("UI", "app_title"));
