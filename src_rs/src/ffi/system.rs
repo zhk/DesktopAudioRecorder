@@ -221,6 +221,7 @@ pub const SC_MASK: WPARAM = 0xFFF0;
 pub const MB_OK: UINT = 0x0000_0000;
 pub const MB_ICONERROR: UINT = 0x0000_0010;
 pub const MB_ICONINFORMATION: UINT = 0x0000_0040;
+pub const MB_ICONWARNING: UINT = 0x0000_0030;
 
 // 菜单
 pub const MF_STRING: UINT = 0x0000_0000;

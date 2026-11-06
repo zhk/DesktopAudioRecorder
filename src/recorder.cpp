@@ -22,6 +22,9 @@ const PROPERTYKEY kPKeyDeviceFriendlyName = {{0xa45c254e, 0xdf1c, 0x4efd,
 
 constexpr uint32_t BITRATE = 192000;
 constexpr int WATCH_GRACE_POLLS = 5;
+// 自动开始失败后的重试次数与退避（单位 = 看门狗 tick，即 2s）
+constexpr int MAX_AUTO_START_RETRIES = 3;
+constexpr int kRetryTicks[MAX_AUTO_START_RETRIES] = {1, 2, 4};
 
 // 自动分割的可选时长（分钟）与对应的语言文件 key，顺序即下拉框顺序
 constexpr int kSplitMinutes[4] = {15, 30, 60, 90};
@@ -59,10 +62,23 @@ uint32_t g_capRate = 0;
 uint16_t g_capChannels = 0;
 // 采集线程上报的运行期错误（编码器本身可能没出错），StopRecording 据此写“中断”日志
 std::wstring g_pendingError;
+// 本次录制使用的麦克风设备 id（重连时复用）
+std::wstring g_micId;
+// 自动开始的失败重试状态（看门狗 tick 计数）
+int g_startRetries = 0;
+int g_retryCountdown = 0;
 
 void NoteRecordError(const std::wstring &msg)
 {
 	g_pendingError = msg;
+}
+
+void ResetAutoWatchState()
+{
+	g_autoSuppress = false;
+	g_inactivePolls = 0;
+	g_startRetries = 0;
+	g_retryCountdown = 0;
 }
 
 void FillSplitCombo()
@@ -251,6 +267,62 @@ void RefreshDevices()
 		EnableWindow(g_btnStart, TRUE);
 }
 
+int FindRenderIndex(const std::wstring &deviceId)
+{
+	if (deviceId.empty())
+		return -1;
+	for (size_t i = 0; i < g_renderIds.size(); ++i)
+	{
+		if (g_renderIds[i] == deviceId)
+			return static_cast<int>(i);
+	}
+	return -1;
+}
+
+// 刷新设备列表，但把用户当前的选择尽量保留下来（FillDeviceCombo 会重置为默认设备）
+void RefreshDevicesKeepingSelection()
+{
+	const bool wasRecording = g_recording;
+
+	std::wstring keep, keepMic;
+	const int sel = ComboBox_GetCurSel(g_combo);
+	if (sel >= 0 && static_cast<size_t>(sel) < g_renderIds.size())
+		keep = g_renderIds[sel];
+	const int micSel = ComboBox_GetCurSel(g_comboMic);
+	if (micSel > 0 && static_cast<size_t>(micSel - 1) < g_micIds.size())
+		keepMic = g_micIds[micSel - 1];
+
+	RefreshDevices();
+
+	if (!keep.empty())
+	{
+		const int idx = FindRenderIndex(keep);
+		if (idx >= 0)
+			ComboBox_SetCurSel(g_combo, idx);
+	}
+	if (!keepMic.empty())
+	{
+		for (size_t i = 0; i < g_micIds.size(); ++i)
+		{
+			if (g_micIds[i] == keepMic)
+			{
+				ComboBox_SetCurSel(g_comboMic, static_cast<int>(i) + 1);
+				break;
+			}
+		}
+	}
+
+	if (wasRecording)
+	{
+		EnableWindow(g_combo, FALSE);
+		EnableWindow(g_comboMic, FALSE);
+		EnableWindow(g_chkAec, FALSE);
+		EnableWindow(g_btnRefresh, FALSE);
+		EnableWindow(g_chkAutoSplit, FALSE);
+		EnableWindow(g_comboSplit, FALSE);
+	}
+}
+
 void ShowRecordingStatus()
 {
 	std::wstring text = std::wstring(S(L"Status", L"start")) + L": " + g_startTime + L"\r\n" + S(L"Status", L"recording") + L"  " + S(L"Status", L"duration") + L" " + FormatDuration(GetTickCount64() - g_startTick);
@@ -260,10 +332,12 @@ void ShowRecordingStatus()
 	SetStatus(text);
 }
 
-bool StartRecording(bool fromAuto)
+bool StartRecording(bool fromAuto, int renderOverride, const std::wstring &nameOverride)
 {
 	SyncSplitFromControls();
 	g_pendingError.clear();
+	g_startRetries = 0;
+	g_retryCountdown = 0;
 	if (!fromAuto)
 		g_meetingApp.clear();
 
@@ -277,7 +351,9 @@ bool StartRecording(bool fromAuto)
 		return false;
 	};
 
-	const int sel = ComboBox_GetCurSel(g_combo);
+	int sel = renderOverride;
+	if (sel < 0 || static_cast<size_t>(sel) >= g_renderIds.size())
+		sel = ComboBox_GetCurSel(g_combo);
 	if (sel < 0 || static_cast<size_t>(sel) >= g_renderIds.size())
 	{
 		AppendLogLine(L"start failed:  " + std::wstring(S(L"Status", L"error_no_device")));
@@ -288,10 +364,16 @@ bool StartRecording(bool fromAuto)
 	const int micSel = ComboBox_GetCurSel(g_comboMic);
 
 	wchar_t nameBuf[256]{};
-	GetWindowTextW(g_combo, nameBuf, 256);
-	g_deviceName = nameBuf;
+	g_deviceName = nameOverride;
+	if (g_deviceName.empty())
+	{
+		GetWindowTextW(g_combo, nameBuf, 256);
+		g_deviceName = nameBuf;
+	}
 	g_micName = S(L"UI", L"mic_none");
+	g_micId.clear();
 
+	std::wstring warn; // 麦克风失败但录制可以继续时的提示
 	std::wstring err;
 
 	auto capture = std::make_unique<WasapiCapture>();
@@ -304,11 +386,19 @@ bool StartRecording(bool fromAuto)
 		micCap = std::make_unique<WasapiCapture>();
 		if (!micCap->Start(g_micIds[micSel - 1], false, err))
 		{
-			capture->Stop();
-			return fail(std::wstring(S(L"Status", L"error_mic")) + L"\r\n" + err + L"\r\n（" + S(L"Status", L"error_mic_hint") + L"）");
+			// 麦克风起不来不再让整场录制失败：降级为只录播放设备
+			AppendLogLine(L"mic capture failed, recording playback only:  " + err);
+			micCap.reset();
+			if (!fromAuto)
+				warn = std::wstring(S(L"Status", L"warn_mic_fallback")) + L"\r\n" + err
+				       + L"\r\n（" + S(L"Status", L"error_mic_hint") + L"）";
 		}
-		GetWindowTextW(g_comboMic, nameBuf, 256);
-		g_micName = nameBuf;
+		else
+		{
+			GetWindowTextW(g_comboMic, nameBuf, 256);
+			g_micName = nameBuf;
+			g_micId = g_micIds[micSel - 1];
+		}
 	}
 
 	auto mixer = std::make_unique<AudioMixer>();
@@ -371,10 +461,12 @@ bool StartRecording(bool fromAuto)
 	EnableWindow(g_chkAutoSplit, FALSE);
 	EnableWindow(g_comboSplit, FALSE);
 	ShowRecordingStatus();
+	if (!warn.empty())
+		MessageBoxW(g_hwnd, warn.c_str(), S(L"About", L"title"), MB_ICONWARNING);
 	return true;
 }
 
-void StopRecording()
+void StopRecording(StopReason reason)
 {
 	if (!g_recording)
 		return;
@@ -425,13 +517,19 @@ void StopRecording()
 	if (g_splitIndex > 0)
 		AppendLog(L"auto split wrote " + std::to_wstring(g_splitIndex + 1) + L" files");
 
-	if (g_autoStarted)
+	if (reason == StopReason::User && g_autoStarted)
 	{
-		g_autoStarted = false;
 		std::wstring dummy;
 		if (Button_GetCheck(g_chkAutoTeams) == BST_CHECKED && TeamsWatcher::MeetingActive(dummy))
+		{
 			g_autoSuppress = true;
+			AppendLog(L"auto-record suppressed for the rest of this meeting (manual stop)");
+		}
 	}
+	g_autoStarted = false;
+	g_startRetries = 0;
+	// 异常中断：让看门狗 2s 后重新自动开始；其余情况清零
+	g_retryCountdown = (reason == StopReason::DeviceError) ? 1 : 0;
 
 	g_micCap.reset();
 	g_capture.reset();
@@ -451,33 +549,190 @@ void StopRecording()
 	EnableWindow(g_comboSplit, TRUE);
 }
 
+// 采集报错后的自愈：保住已经写好的分段，换到可用的播放设备继续录。
+// 结果是后续内容进入新的分段文件（同一场会议会出现多个文件），已录部分不受影响。
+bool TryReconnectCapture()
+{
+	if (!g_recording || !g_capture)
+		return false;
+	AppendLog(L"capture error, trying to switch to another playback device");
+
+	// 1) 只停采集线程，先不关编码器：已经录到的内容必须保住
+	if (g_micCap)
+		g_micCap->Stop();
+	g_capture->Stop();
+
+	// 2) 设备列表很可能已经变了
+	RefreshDevicesKeepingSelection();
+
+	// 3) 优先用会议正在使用的设备，其次用下拉框当前选择
+	std::wstring app, devId, devName;
+	TeamsWatcher::MeetingActive(app, devId, devName);
+	int idx = FindRenderIndex(devId);
+	if (idx < 0)
+		idx = ComboBox_GetCurSel(g_combo);
+	if (idx < 0 || static_cast<size_t>(idx) >= g_renderIds.size())
+	{
+		AppendLog(L"reconnect failed: no usable playback device");
+		return false;
+	}
+
+	std::wstring err;
+	auto cap = std::make_unique<WasapiCapture>();
+	if (!cap->Start(g_renderIds[idx], true, err))
+	{
+		AppendLogLine(L"reconnect failed:  " + err);
+		return false;
+	}
+
+	// 4) 麦克风起不来就降级为只录播放设备
+	std::unique_ptr<WasapiCapture> micCap;
+	if (!g_micId.empty())
+	{
+		int micIdx = -1;
+		for (size_t i = 0; i < g_micIds.size(); ++i)
+		{
+			if (g_micIds[i] == g_micId)
+			{
+				micIdx = static_cast<int>(i);
+				break;
+			}
+		}
+		if (micIdx < 0)
+		{
+			AppendLog(L"mic device gone, recording playback only");
+		}
+		else
+		{
+			micCap = std::make_unique<WasapiCapture>();
+			if (!micCap->Start(g_micIds[micIdx], false, err))
+			{
+				AppendLogLine(L"mic capture failed after reconnect, recording playback only:  " + err);
+				micCap.reset();
+			}
+		}
+	}
+
+	// 5) 新的分段文件（沿用自动分割的命名规则）
+	const std::wstring newPath = g_splitBase + L"_" + std::to_wstring(g_splitIndex + 1) + L".mp3";
+	auto next = std::make_unique<Mp3Writer>();
+	if (!next->Open(newPath, cap->SampleRate(), cap->Channels(), BITRATE, err))
+	{
+		AppendLogLine(L"reconnect failed (encoder):  " + err);
+		cap->Stop();
+		return false;
+	}
+
+	std::unique_ptr<Mp3Writer> prev;
+	{
+		std::lock_guard<std::mutex> lk(g_wmtx);
+		prev.swap(g_writer);
+		g_writer = std::move(next);
+	}
+	if (prev)
+		prev->Close();
+
+	// 6) 新混音器 + 新采集线程
+	auto mixer = std::make_unique<AudioMixer>();
+	mixer->Open(cap->SampleRate(), cap->Channels(),
+		    [](const int16_t *d, uint32_t f)
+		    {
+			    std::lock_guard<std::mutex> lk(g_wmtx);
+			    if (g_writer)
+				    g_writer->Push(d, f);
+		    });
+	mixer->SetEchoCancellation(Button_GetCheck(g_chkAec) == BST_CHECKED);
+	if (micCap)
+		mixer->SetMicFormat(micCap->SampleRate(), micCap->Channels());
+
+	AudioMixer *mx = mixer.get();
+	HWND hwnd = g_hwnd;
+	auto errFn = [hwnd](const std::wstring &msg)
+	{
+		PostMessageW(hwnd, WM_APP + 1, 0, reinterpret_cast<LPARAM>(new std::wstring(msg)));
+	};
+	cap->Begin([mx](const int16_t *d, uint32_t f) { mx->PushDesktop(d, f); }, errFn);
+	if (micCap)
+		micCap->Begin([mx](const int16_t *d, uint32_t f) { mx->PushMic(d, f); }, errFn);
+
+	g_capture = std::move(cap); // 旧的（已 Stop）在这里被销毁
+	g_micCap = std::move(micCap);
+	g_mixer = std::move(mixer);
+
+	g_capRate = g_capture->SampleRate();
+	g_capChannels = g_capture->Channels();
+	if (!devName.empty())
+	{
+		g_deviceName = devName;
+	}
+	else
+	{
+		wchar_t nameBuf[256]{};
+		GetWindowTextW(g_combo, nameBuf, 256);
+		g_deviceName = nameBuf;
+	}
+	if (!g_micCap)
+		g_micName = S(L"UI", L"mic_none");
+	g_outPath = newPath;
+	++g_splitIndex;
+	g_segStartTick = GetTickCount64();
+	ShowRecordingStatus();
+	AppendLog(L"reconnected  device: " + g_deviceName + L"  mic: " + g_micName + L"  file: " + g_outPath);
+	g_pendingError.clear();
+	return true;
+}
+
 void OnWatchTick()
 {
 	if (Button_GetCheck(g_chkAutoTeams) != BST_CHECKED)
 		return;
 
-	std::wstring app;
-	if (TeamsWatcher::MeetingActive(app))
+	std::wstring app, devId, devName;
+	if (TeamsWatcher::MeetingActive(app, devId, devName))
 	{
 		g_inactivePolls = 0;
-		if (!g_recording && !g_autoSuppress)
+		if (g_recording || g_autoSuppress)
+			return;
+
+		if (g_retryCountdown > 0)
 		{
-			g_meetingApp = app;
-			if (StartRecording(true))
-				g_autoStarted = true;
-			else
-				g_autoSuppress = true;
+			--g_retryCountdown;
+			return;
+		}
+
+		g_meetingApp = app;
+		if (StartRecording(true, FindRenderIndex(devId), devName))
+		{
+			g_autoStarted = true;
+			g_startRetries = 0;
+			if (!devId.empty())
+				AppendLog(L"auto-start on the meeting's active playback device:  " + devName);
+		}
+		else if (++g_startRetries > MAX_AUTO_START_RETRIES)
+		{
+			g_autoSuppress = true;
+			g_startRetries = 0;
+			AppendLog(L"auto-record gave up after 4 failed attempts for this meeting");
+		}
+		else
+		{
+			RefreshDevicesKeepingSelection();
+			g_retryCountdown = kRetryTicks[g_startRetries - 1];
+			AppendLog(L"auto-record will retry, attempt " + std::to_wstring(g_startRetries + 1) +
+				  L" in " + std::to_wstring(g_retryCountdown * 2) + L"s");
 		}
 	}
 	else
 	{
 		g_autoSuppress = false;
+		g_startRetries = 0;
+		g_retryCountdown = 0;
 		if (g_recording && g_autoStarted)
 		{
 			if (++g_inactivePolls >= WATCH_GRACE_POLLS)
 			{
 				AppendLog(L"Meeting ended (Teams/WeChat/DingTalk/TencentMeeting), auto stop  file: " + g_outPath);
-				StopRecording();
+				StopRecording(StopReason::Auto);
 				g_inactivePolls = 0;
 				SetStatus(std::wstring(S(L"Status", L"start")) + L": " + g_startTime + L"\r\n" + S(L"Status", L"end") + L": " + Timestamp() + L"\r\n" + S(L"Status", L"teams_stopped") + L"\r\n" + S(L"Status", L"file") + L": " + g_outPath);
 			}

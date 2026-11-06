@@ -8,6 +8,11 @@
 namespace
 {
 
+// PKEY_Device_FriendlyName
+const PROPERTYKEY kPKeyDeviceFriendlyName = {{0xa45c254e, 0xdf1c, 0x4efd,
+					     {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}},
+					    14};
+
 bool IsMeetingProcess(DWORD pid, std::wstring &app)
 {
 	HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
@@ -46,12 +51,29 @@ bool IsMeetingProcess(DWORD pid, std::wstring &app)
 	return false;
 }
 
+std::wstring DeviceName(IMMDevice *device)
+{
+	std::wstring name;
+	IPropertyStore *store = nullptr;
+	if (FAILED(device->OpenPropertyStore(STGM_READ, &store)))
+		return name;
+	PROPVARIANT pv;
+	PropVariantInit(&pv);
+	if (SUCCEEDED(store->GetValue(kPKeyDeviceFriendlyName, &pv)) && pv.vt == VT_LPWSTR && pv.pwszVal)
+		name = pv.pwszVal;
+	PropVariantClear(&pv);
+	store->Release();
+	return name;
+}
+
 } // namespace
 
-bool TeamsWatcher::MeetingActive(std::wstring &app)
+bool TeamsWatcher::MeetingActive(std::wstring &app, std::wstring &deviceId, std::wstring &deviceName)
 {
 	bool active = false;
 	app.clear();
+	deviceId.clear();
+	deviceName.clear();
 
 	IMMDeviceEnumerator *enumerator = nullptr;
 	HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
@@ -79,15 +101,20 @@ bool TeamsWatcher::MeetingActive(std::wstring &app)
 		IAudioSessionManager2 *manager = nullptr;
 		hr = device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
 				      reinterpret_cast<void **>(&manager));
-		device->Release();
 		if (FAILED(hr))
+		{
+			device->Release();
 			continue;
+		}
 
 		IAudioSessionEnumerator *sessionEnum = nullptr;
 		hr = manager->GetSessionEnumerator(&sessionEnum);
 		manager->Release();
 		if (FAILED(hr))
+		{
+			device->Release();
 			continue;
+		}
 
 		int count = 0;
 		sessionEnum->GetCount(&count);
@@ -103,17 +130,28 @@ bool TeamsWatcher::MeetingActive(std::wstring &app)
 				IAudioSessionControl2 *ctl2 = nullptr;
 				if (SUCCEEDED(ctl->QueryInterface(__uuidof(IAudioSessionControl2),
 								  reinterpret_cast<void **>(&ctl2))))
-								  {
+				{
 					DWORD pid = 0;
 					if (SUCCEEDED(ctl2->GetProcessId(&pid)) && pid != 0
 					    && IsMeetingProcess(pid, app))
+					{
 						active = true;
+						// 这台设备就是会议音频当前所在的输出设备
+						LPWSTR id = nullptr;
+						if (SUCCEEDED(device->GetId(&id)) && id)
+						{
+							deviceId = id;
+							CoTaskMemFree(id);
+						}
+						deviceName = DeviceName(device);
+					}
 					ctl2->Release();
 				}
 			}
 			ctl->Release();
 		}
 		sessionEnum->Release();
+		device->Release();
 	}
 
 	deviceCollection->Release();

@@ -251,7 +251,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 		switch (LOWORD(wp))
 		{
 		case IDC_BTN_START:
-			g_recording ? StopRecording() : (void)StartRecording(false);
+			g_recording ? StopRecording(StopReason::User) : (void)StartRecording(false);
 			return 0;
 		case IDC_BTN_REFRESH:
 			if (!g_recording)
@@ -266,8 +266,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 			SaveConfig();
 			if (checked)
 			{
-				g_autoSuppress = false;
-				g_inactivePolls = 0;
+				ResetAutoWatchState();
 				AppendLog(L"Meeting monitor ON");
 				if (!g_recording)
 					SetStatus(S(L"Status", L"auto_teams_on"));
@@ -381,8 +380,15 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 	{
 		std::unique_ptr<std::wstring> m(reinterpret_cast<std::wstring *>(lp));
 		NoteRecordError(*m);
+		if (g_recording && TryReconnectCapture())
+		{
+			// 已经换到新的播放设备继续录，之前录到的内容在旧分段文件里
+			MessageBoxW(hwnd, (std::wstring(S(L"Status", L"auto_reconnecting")) + L"\r\n" + *m).c_str(),
+				  S(L"About", L"title"), MB_ICONWARNING);
+			return 0;
+		}
 		if (g_recording)
-			StopRecording();
+			StopRecording(StopReason::DeviceError);
 		else
 			AppendLogLine(L"record error:  " + *m);
 		MessageBoxW(hwnd, m->c_str(), S(L"About", L"title"), MB_ICONERROR);
@@ -392,7 +398,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 	case WM_CLOSE:
 		if (g_recording)
-			StopRecording();
+			StopRecording(StopReason::Exiting);
 		RemoveTrayIcon();
 		DestroyWindow(hwnd);
 		return 0;
@@ -423,7 +429,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCmd)
 
 	LoadConfig();
 
-	AppendLog(L"App started  v1.4");
+	AppendLog(L"App started  v1.5");
 
 	wchar_t logBuf[256];
 	swprintf_s(logBuf, L"Config  lang=%s  auto_teams=%d  auto_start=%d  auto_split=%d  split_minutes=%d",

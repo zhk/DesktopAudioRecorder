@@ -33,11 +33,24 @@ void SetStatus(const std::wstring &text);
 void ShowRecordingStatus();
 void FillDeviceCombo(HWND combo, std::vector<std::wstring> &ids, EDataFlow flow, bool addNone);
 void RefreshDevices();
-bool StartRecording(bool fromAuto);
-void StopRecording();
+void RefreshDevicesKeepingSelection();
+int FindRenderIndex(const std::wstring &deviceId);
+enum class StopReason
+{
+	User,        // 用户点了停止按钮（唯一会抑制本场自动重开的情况）
+	DeviceError, // 采集/编码器运行期错误
+	Auto,        // 看门狗检测到会议结束
+	Exiting,     // 程序退出
+};
+bool StartRecording(bool fromAuto, int renderOverride = -1, const std::wstring &nameOverride = std::wstring());
+void StopRecording(StopReason reason);
 void OnWatchTick();
 void FillSplitCombo();
 void SyncSplitFromControls();
 void MaybeSplitOutput();
 // 采集线程运行期错误：让 StopRecording 把它当“中断”写日志（编码器本身没出错时）
 void NoteRecordError(const std::wstring &msg);
+// 打开/关闭自动录制开关时重置看门狗状态
+void ResetAutoWatchState();
+// 采集报错后自愈：保住已录的分段，换设备继续录（同一场会议会出现多个文件）
+bool TryReconnectCapture();

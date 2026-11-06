@@ -7,15 +7,16 @@
 use core::ptr::null_mut;
 
 use crate::ffi::system::{
-    CloseHandle, CoCreateInstance, OpenProcess, QueryFullProcessImageNameW, MAX_PATH,
-    PROCESS_QUERY_LIMITED_INFORMATION,
+    CloseHandle, CoCreateInstance, CoTaskMemFree, OpenProcess, PropVariantClear,
+    QueryFullProcessImageNameW, MAX_PATH, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use crate::ffi::wasapi::{
     eRender, AudioSessionStateActive, IAudioSessionControl, IAudioSessionControl2,
     IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection,
-    IMMDeviceEnumerator, CLSID_MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+    IMMDeviceEnumerator, IPropertyStore, CLSID_MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+    PKEY_DEVICE_FRIENDLY_NAME, STGM_READ,
 };
-use crate::ffi::{failed, succeeded, Com, ComPtr, CLSCTX_ALL, FALSE};
+use crate::ffi::{failed, succeeded, Com, ComPtr, CLSCTX_ALL, FALSE, LPWSTR, PROPVARIANT, VT_LPWSTR};
 use crate::util::from_wide;
 
 pub struct TeamsWatcher;
@@ -68,9 +69,51 @@ fn is_meeting_process(pid: u32, app: &mut String) -> bool {
     }
 }
 
+/// 复制 NUL 结尾的 UTF-16 字符串（含结尾 NUL），与 `app.rs` 里设备 ID 的表示保持一致，
+/// 这样两边拿到的 ID 才能直接比较。
+///
+/// # Safety
+/// `p` 必须指向合法的 NUL 结尾 UTF-16 字符串。
+unsafe fn wide_from_ptr(p: LPWSTR) -> Vec<u16> {
+    let mut len = 0usize;
+    while *p.add(len) != 0 {
+        len += 1;
+    }
+    core::slice::from_raw_parts(p, len + 1).to_vec()
+}
+
+/// 端点的 `PKEY_Device_FriendlyName`（下拉框里显示的名字）。
+unsafe fn device_name(device: &IMMDevice) -> String {
+    let mut store = ComPtr::<IPropertyStore>::null();
+    if failed(device.open_property_store(STGM_READ, store.as_out_ptr())) {
+        return String::new();
+    }
+    let mut name = String::new();
+    let mut pv = PROPVARIANT::zeroed();
+    if succeeded(store.expect_ref().get_value(&PKEY_DEVICE_FRIENDLY_NAME, &mut pv))
+        && pv.vt == VT_LPWSTR
+        && !pv.data.pwsz_val.is_null()
+    {
+        name = from_wide(&wide_from_ptr(pv.data.pwsz_val));
+    }
+    PropVariantClear(&mut pv);
+    name
+}
+
 impl TeamsWatcher {
+    /// 只关心“是否在开会”的调用方用这个。
     pub fn meeting_active(app: &mut String) -> bool {
+        let mut id = Vec::new();
+        let mut name = String::new();
+        Self::meeting_active_device(app, &mut id, &mut name)
+    }
+
+    /// `device_id` = 会议音频当前实际所在的播放设备 ID（含结尾 NUL），
+    /// `device_name` = 该设备的友好名；检测不到会议时两者留空。
+    pub fn meeting_active_device(app: &mut String, device_id: &mut Vec<u16>, device_name_out: &mut String) -> bool {
         app.clear();
+        device_id.clear();
+        device_name_out.clear();
         unsafe {
             let mut enumerator = ComPtr::<IMMDeviceEnumerator>::null();
             let hr = CoCreateInstance(
@@ -145,6 +188,13 @@ impl TeamsWatcher {
                         && pid != 0
                         && is_meeting_process(pid, app)
                     {
+                        // 这台设备就是会议音频当前所在的输出设备
+                        let mut id_ptr: LPWSTR = null_mut();
+                        if succeeded(device.expect_ref().get_id(&mut id_ptr)) && !id_ptr.is_null() {
+                            *device_id = wide_from_ptr(id_ptr);
+                            CoTaskMemFree(id_ptr as *mut core::ffi::c_void);
+                        }
+                        *device_name_out = device_name(device.expect_ref());
                         return true;
                     }
                 }

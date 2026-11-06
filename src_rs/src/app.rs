@@ -34,7 +34,7 @@ GetSystemMenu, GetSystemMetrics, GetTickCount64, GetUserDefaultUILanguage, GetWi
     CBS_DROPDOWNLIST, CBN_SELCHANGE, COLOR_BTNFACE, CW_USEDEFAULT, DEFAULT_GUI_FONT, ES_AUTOVSCROLL, ES_MULTILINE,
     ES_READONLY, ICC_STANDARD_CLASSES, IDC_ARROW, IDC_WAIT, IMAGE_ICON, INITCOMMONCONTROLSEX, GW_CHILD, GW_HWNDNEXT,
     HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, ERROR_SUCCESS,
-    LR_DEFAULTSIZE, LR_SHARED, MAX_PATH, MB_OK, MB_ICONERROR, MB_ICONINFORMATION, MF_BYPOSITION,
+    LR_DEFAULTSIZE, LR_SHARED, MAX_PATH, MB_OK, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MF_BYPOSITION,
     MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MSG, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD,
     NIM_DELETE, NOTIFYICONDATAW, POINT, RECT, SC_MINIMIZE, SM_CXSMICON, SM_CYSMICON, SS_LEFT, SW_HIDE,
     SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, ShellExecuteW, SW_SHOWNORMAL, SYSTEMTIME, TPM_BOTTOMALIGN,
@@ -91,6 +91,22 @@ const WATCH_GRACE_POLLS: u32 = 5;
 const SPLIT_MINUTES: [u32; 4] = [15, 30, 60, 90];
 /// 上述时长对应的语言文件 key
 const SPLIT_KEYS: [&str; 4] = ["split_15", "split_30", "split_60", "split_90"];
+/// 自动开始失败后的重试次数与退避（单位 = 看门狗 tick，即 2s）
+const MAX_AUTO_START_RETRIES: i32 = 3;
+const RETRY_TICKS: [i32; MAX_AUTO_START_RETRIES as usize] = [1, 2, 4];
+
+/// 停止录制的原因（只有用户手动停止才会抑制本场会议再次自动开始）
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopReason {
+    /// 用户点了停止按钮
+    User,
+    /// 采集/编码器运行期错误
+    DeviceError,
+    /// 看门狗检测到会议结束
+    Auto,
+    /// 程序退出
+    Exiting,
+}
 /// `resource.h` 里的 `IDI_APP`
 const IDI_APP: u16 = 101;
 
@@ -287,6 +303,10 @@ impl PendingMessage {
         Self { text, title: title.to_string(), flags: MB_ICONINFORMATION }
     }
 
+    fn warning(text: String) -> Self {
+        Self { text, title: tr("About", "title").to_string(), flags: MB_ICONWARNING }
+    }
+
     /// 必须在**没有**持有 `APP` 借用时调用。
     fn show(&self, hwnd: HWND) {
         let text = to_wide(&self.text);
@@ -404,6 +424,11 @@ struct App {
     inactive_polls: u32,
     /// 采集线程上报的运行期错误：编码器本身没出错时，stop_recording 据此按“中断”记录
     pending_error: Option<String>,
+    /// 本次录制使用的麦克风设备 ID（重连时复用）
+    mic_id: Vec<u16>,
+    /// 自动开始的失败重试状态（看门狗 tick 计数）
+    start_retries: i32,
+    retry_countdown: i32,
     start_tick: u64,
     start_time: String,
     out_path: PathBuf,
@@ -442,6 +467,9 @@ impl App {
             auto_suppress: false,
             inactive_polls: 0,
             pending_error: None,
+            mic_id: Vec::new(),
+            start_retries: 0,
+            retry_countdown: 0,
             start_tick: 0,
             start_time: String::new(),
             out_path: PathBuf::new(),
@@ -626,11 +654,62 @@ impl App {
         }
     }
 
+    /// 在播放设备列表里查找设备 ID 的下标；没找到返回 `None`。
+    fn find_render_index(&self, device_id: &[u16]) -> Option<usize> {
+        if device_id.is_empty() {
+            return None;
+        }
+        self.render_ids.iter().position(|id| id == device_id)
+    }
+
+    /// 刷新设备列表，但把用户当前的选择尽量保留下来（`fill_device_combo` 会重置为默认设备）。
+    /// 录制进行中时会重新禁用被 `refresh_devices` 放开的控件。
+    fn refresh_devices_keeping_selection(&mut self) {
+        let was_recording = self.session.is_some();
+
+        let keep = combo_cur_sel(self.combo)
+            .try_into()
+            .ok()
+            .and_then(|s: usize| self.render_ids.get(s).cloned())
+            .unwrap_or_default();
+        let keep_mic = (combo_cur_sel(self.combo_mic) - 1)
+            .try_into()
+            .ok()
+            .and_then(|s: usize| self.mic_ids.get(s).cloned())
+            .unwrap_or_default();
+
+        self.refresh_devices();
+
+        if !keep.is_empty() {
+            if let Some(idx) = self.find_render_index(&keep) {
+                combo_set_cur_sel(self.combo, idx as i32);
+            }
+        }
+        if !keep_mic.is_empty() {
+            if let Some(idx) = self.mic_ids.iter().position(|id| *id == keep_mic) {
+                combo_set_cur_sel(self.combo_mic, idx as i32 + 1);
+            }
+        }
+
+        if was_recording {
+            unsafe {
+                EnableWindow(self.combo, FALSE);
+                EnableWindow(self.combo_mic, FALSE);
+                EnableWindow(self.chk_aec, FALSE);
+                EnableWindow(self.btn_refresh, FALSE);
+                EnableWindow(self.chk_auto_split, FALSE);
+                EnableWindow(self.combo_split, FALSE);
+            }
+        }
+    }
+
     fn on_auto_teams_toggled(&mut self) {
         if button_checked(self.chk_auto_teams) {
             self.auto_suppress = false;
             self.inactive_polls = 0;
-            append_log("Teams monitor ON");
+            self.start_retries = 0;
+            self.retry_countdown = 0;
+            append_log("Meeting monitor ON");
             if self.session.is_none() {
                 self.set_status(tr("Status", "auto_teams_on"));
             }
@@ -697,14 +776,19 @@ impl App {
         StartOutcome { started: false, message: self.fail(from_auto, msg) }
     }
 
-    fn start_recording(&mut self, from_auto: bool) -> StartOutcome {
+    fn start_recording(&mut self, from_auto: bool, render_override: Option<usize>, name_override: Option<String>) -> StartOutcome {
         self.sync_split_from_controls();
         self.pending_error = None;
+        self.start_retries = 0;
+        self.retry_countdown = 0;
         if !from_auto {
             self.meeting_app.clear();
         }
-        let sel = combo_cur_sel(self.combo);
-if sel < 0 || sel as usize >= self.render_ids.len() {
+        let sel = match render_override {
+            Some(i) if i < self.render_ids.len() => i as i32,
+            _ => combo_cur_sel(self.combo),
+        };
+        if sel < 0 || sel as usize >= self.render_ids.len() {
             append_log(&format!("start failed:  {}", tr("Status", "error_no_device")));
             return StartOutcome {
                 started: false,
@@ -718,8 +802,9 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
         // 0 = 不录制
         let mic_sel = combo_cur_sel(self.combo_mic);
 
-        self.device_name = combo_text(self.combo);
+        self.device_name = name_override.filter(|s| !s.is_empty()).unwrap_or_else(|| combo_text(self.combo));
         self.mic_name = tr("UI", "mic_none").to_string();
+        self.mic_id.clear();
 
         // 1) 桌面 loopback 采集
         let device_id = self.render_ids[sel as usize].clone();
@@ -729,19 +814,29 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
         }
 
         // 2) 麦克风采集（可选）
+        let mut mic_warn: Option<String> = None;
         let mut mic: Option<WasapiCapture> = None;
         if mic_sel > 0 && (mic_sel as usize - 1) < self.mic_ids.len() {
             let mic_id = self.mic_ids[mic_sel as usize - 1].clone();
             let mut cap = WasapiCapture::new();
-            if let Err(e) = cap.start(Some(&mic_id), false) {
-                desktop.stop();
-                return self.start_failure(
-                    from_auto,
-                    format!("{}\r\n{e}\r\n{}", tr("Status", "error_mic"), tr("Status", "error_mic_hint")),
-                );
+            match cap.start(Some(&mic_id), false) {
+                Ok(()) => {
+                    self.mic_name = combo_text(self.combo_mic);
+                    self.mic_id = mic_id;
+                    mic = Some(cap);
+                }
+                Err(e) => {
+                    // 麦克风起不来不再让整场录制失败：降级为只录播放设备
+                    append_log(&format!("mic capture failed, recording playback only:  {e}"));
+                    if !from_auto {
+                        mic_warn = Some(format!(
+                            "{}\r\n{e}\r\n（{}）",
+                            tr("Status", "warn_mic_fallback"),
+                            tr("Status", "error_mic_hint")
+                        ));
+                    }
+                }
             }
-            self.mic_name = combo_text(self.combo_mic);
-            mic = Some(cap);
         }
 
         // 3) 混音器 + 编码器（输出格式跟随桌面流）
@@ -831,10 +926,10 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
         }
         self.show_recording_status();
 
-        StartOutcome { started: true, message: None }
+        StartOutcome { started: true, message: mic_warn.map(PendingMessage::warning) }
     }
 
-    fn stop_recording(&mut self) {
+    fn stop_recording(&mut self, reason: StopReason) {
         let Some(session) = self.session.take() else {
             return;
         };
@@ -894,14 +989,18 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
             append_log(&format!("auto split wrote {} files", split_index + 1));
         }
 
-        // 用户手动停止了自动开始的录制 → 本次会议内抑制自动重开
-        if self.auto_started {
-            self.auto_started = false;
+        // 只有用户手动停止才抑制本场会议的自动重开；异常中断/自动结束都应继续尝试
+        if reason == StopReason::User && self.auto_started {
             let mut dummy = String::new();
             if button_checked(self.chk_auto_teams) && TeamsWatcher::meeting_active(&mut dummy) {
                 self.auto_suppress = true;
+                append_log("auto-record suppressed for the rest of this meeting (manual stop)");
             }
         }
+        self.auto_started = false;
+        self.start_retries = 0;
+        // 异常中断：让看门狗 2s 后重新自动开始；其余情况清零
+        self.retry_countdown = if reason == StopReason::DeviceError { 1 } else { 0 };
 
         self.record_count += 1;
         set_window_text(self.record_count_text, &format!("{}: {}", tr("UI", "record_count"), self.record_count));
@@ -925,24 +1024,52 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
         }
 
         let mut app = String::new();
-        if TeamsWatcher::meeting_active(&mut app) {
+        let mut device_id: Vec<u16> = Vec::new();
+        let mut device_name = String::new();
+        if TeamsWatcher::meeting_active_device(&mut app, &mut device_id, &mut device_name) {
             self.inactive_polls = 0;
-            if self.session.is_none() && !self.auto_suppress {
-                self.meeting_app = app.clone();
-                if self.start_recording(true).started {
-                    self.auto_started = true;
-                } else {
-                    // 自动开始失败：本次会议内不再反复尝试
+            if self.session.is_some() || self.auto_suppress {
+                return;
+            }
+            if self.retry_countdown > 0 {
+                self.retry_countdown -= 1;
+                return;
+            }
+
+            self.meeting_app = app.clone();
+            let idx = self.find_render_index(&device_id);
+            let outcome = self.start_recording(true, idx, Some(device_name.clone()));
+            if outcome.started {
+                self.auto_started = true;
+                self.start_retries = 0;
+                if !device_id.is_empty() {
+                    append_log(&format!("auto-start on the meeting's active playback device:  {device_name}"));
+                }
+            } else {
+                self.start_retries += 1;
+                if self.start_retries > MAX_AUTO_START_RETRIES {
                     self.auto_suppress = true;
+                    self.start_retries = 0;
+                    append_log("auto-record gave up after 4 failed attempts for this meeting");
+                } else {
+                    self.refresh_devices_keeping_selection();
+                    self.retry_countdown = RETRY_TICKS[(self.start_retries - 1) as usize];
+                    append_log(&format!(
+                        "auto-record will retry, attempt {} in {}s",
+                        self.start_retries + 1,
+                        self.retry_countdown * 2
+                    ));
                 }
             }
         } else {
             self.auto_suppress = false;
+            self.start_retries = 0;
+            self.retry_countdown = 0;
             if self.session.is_some() && self.auto_started {
                 self.inactive_polls += 1;
                 if self.inactive_polls >= WATCH_GRACE_POLLS {
-                    append_log(&format!("Teams meeting ended, auto stop  file: {}", self.out_path.display()));
-                    self.stop_recording();
+                    append_log(&format!("Meeting ended (Teams/WeChat/DingTalk/TencentMeeting), auto stop  file: {}", self.out_path.display()));
+                    self.stop_recording(StopReason::Auto);
                     self.inactive_polls = 0;
                     let path = self.out_path.display().to_string();
                     self.set_status(&format!("{}: {}\r\n{}: {}\r\n{}\r\n{}: {path}", tr("Status", "start"), self.start_time, tr("Status", "end"), timestamp(), tr("Status", "teams_stopped"), tr("Status", "file")));
@@ -1001,6 +1128,146 @@ if sel < 0 || sel as usize >= self.render_ids.len() {
         old_writer.close();
         self.out_path = new_path.clone();
         append_log(&format!("split to next segment  file: {}", new_path.display()));
+    }
+
+    /// 采集报错后的自愈：保住已经写好的分段，换到可用的播放设备继续录
+    /// （同一场会议会出现多个文件，已录部分不受影响）。与 C++ 版 `TryReconnectCapture` 对应。
+    fn try_reconnect_capture(&mut self) -> bool {
+        if self.session.is_none() {
+            return false;
+        }
+        append_log("capture error, trying to switch to another playback device");
+
+        // 1) 只停采集线程，先不关编码器：已经录到的内容必须保住
+        if let Some(session) = self.session.as_ref() {
+            if let Some(mic) = session.mic.as_ref() {
+                mic.stop();
+            }
+            session.desktop.stop();
+        }
+
+        // 2) 设备列表很可能已经变了
+        self.refresh_devices_keeping_selection();
+
+        // 3) 优先用会议正在使用的设备，其次用下拉框当前选择
+        let mut app = String::new();
+        let mut dev_id: Vec<u16> = Vec::new();
+        let mut dev_name = String::new();
+        TeamsWatcher::meeting_active_device(&mut app, &mut dev_id, &mut dev_name);
+        let combo_sel = combo_cur_sel(self.combo);
+        let idx = self.find_render_index(&dev_id).or_else(|| {
+            if combo_sel >= 0 && (combo_sel as usize) < self.render_ids.len() {
+                Some(combo_sel as usize)
+            } else {
+                None
+            }
+        });
+        let Some(idx) = idx else {
+            append_log("reconnect failed: no usable playback device");
+            return false;
+        };
+
+        let mut cap = WasapiCapture::new();
+        if let Err(e) = cap.start(Some(&self.render_ids[idx]), true) {
+            append_log(&format!("reconnect failed:  {e}"));
+            return false;
+        }
+
+        // 4) 麦克风起不来就降级为只录播放设备
+        let mut mic: Option<WasapiCapture> = None;
+        if !self.mic_id.is_empty() {
+            match self.mic_ids.iter().position(|id| *id == self.mic_id) {
+                None => append_log("mic device gone, recording playback only"),
+                Some(mi) => {
+                    let mut mcap = WasapiCapture::new();
+                    if let Err(e) = mcap.start(Some(&self.mic_ids[mi]), false) {
+                        append_log(&format!("mic capture failed after reconnect, recording playback only:  {e}"));
+                    } else {
+                        mic = Some(mcap);
+                    }
+                }
+            }
+        }
+
+        // 5) 新的分段文件（沿用自动分割的命名规则）
+        let (base, index) = {
+            let session = self.session.as_ref().unwrap();
+            (session.split_base.clone(), session.split_index)
+        };
+        let file = match base.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
+            None => {
+                cap.stop();
+                return false;
+            }
+        };
+        let dir = base.parent().map(Path::to_path_buf).unwrap_or_default();
+        let new_path = dir.join(format!("{}_{}.mp3", file, index + 1));
+
+        let new_writer = match Mp3Writer::open(&new_path, cap.sample_rate(), cap.channels(), BITRATE) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                append_log(&format!("reconnect failed (encoder):  {e}"));
+                cap.stop();
+                return false;
+            }
+        };
+
+        {
+            let session = self.session.as_mut().unwrap();
+            session.slot.replace(Arc::clone(&new_writer));
+            let old_writer = std::mem::replace(&mut session.writer, new_writer);
+            old_writer.close();
+        }
+
+        // 6) 新混音器 + 新采集线程
+        let mixer = Arc::new(AudioMixer::new());
+        {
+            let slot_for_mix = self.session.as_ref().unwrap().slot.clone();
+            mixer.open(
+                cap.sample_rate(),
+                cap.channels(),
+                Box::new(move |data: &[i16]| slot_for_mix.push(data)),
+            );
+        }
+        mixer.set_echo_cancellation(button_checked(self.chk_aec));
+        if let Some(m) = mic.as_ref() {
+            mixer.set_mic_format(m.sample_rate(), m.channels());
+        }
+
+        let desktop_error_hwnd = SendableHwnd(self.hwnd);
+        let mix_desktop = Arc::clone(&mixer);
+        cap.begin(
+            Box::new(move |data: &[i16]| mix_desktop.push_desktop(data)),
+            Box::new(move |msg: String| post_record_error(desktop_error_hwnd, msg)),
+        );
+        if let Some(m) = mic.as_mut() {
+            let mic_error_hwnd = SendableHwnd(self.hwnd);
+            let mix_mic = Arc::clone(&mixer);
+            m.begin(
+                Box::new(move |data: &[i16]| mix_mic.push_mic(data)),
+                Box::new(move |msg: String| post_record_error(mic_error_hwnd, msg)),
+            );
+        }
+
+        let session = self.session.as_mut().unwrap();
+        session.desktop = cap; // 旧的（已 stop）在这里被释放
+        session.mic = mic;
+        session.mixer = mixer;
+        session.rate = session.desktop.sample_rate();
+        session.channels = session.desktop.channels();
+        session.split_index = index + 1;
+        session.seg_start_tick = unsafe { GetTickCount64() };
+
+        self.device_name = if dev_name.is_empty() { combo_text(self.combo) } else { dev_name };
+        if session.mic.is_none() {
+            self.mic_name = tr("UI", "mic_none").to_string();
+        }
+        self.out_path = new_path.clone();
+        self.pending_error = None;
+        self.show_recording_status();
+        append_log(&format!("reconnected  device: {}  mic: {}  file: {}", self.device_name, self.mic_name, new_path.display()));
+        true
     }
 
     // ---- 系统托盘 ----
@@ -1401,10 +1668,10 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
                 match id {
                     IDC_BTN_START => {
                         if app.session.is_some() {
-                            app.stop_recording();
+                            app.stop_recording(StopReason::User);
                             None
                         } else {
-                            app.start_recording(false).message
+                            app.start_recording(false, None, None).message
                         }
                     }
                     IDC_BTN_REFRESH => {
@@ -1556,18 +1823,32 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
         WM_RECORD_ERROR => {
             // 收回采集线程投递过来的 Box<String>
             let message = *Box::from_raw(lp as *mut String);
-            APP.with(|cell| {
+            let recovered = APP.with(|cell| {
                 let mut app = cell.borrow_mut();
-                if app.session.is_some() {
-                    app.pending_error = Some(message.clone());
-                    app.stop_recording();
-                } else {
+                if app.session.is_none() {
                     append_log(&format!("record error:  {}", one_line(&message)));
+                    return false;
                 }
+                app.pending_error = Some(message.clone());
+                // 先试自愈：换设备继续录，已录内容留在旧分段文件里
+                if app.try_reconnect_capture() {
+                    return true;
+                }
+                app.stop_recording(StopReason::DeviceError);
+                false
             });
+            if recovered {
+                PendingMessage::warning(format!("{}\r\n{}", tr("Status", "auto_reconnecting"), message)).show(hwnd);
+                return 0;
+            }
             let ts = timestamp();
             PendingMessage::recording_error(message.clone()).show(hwnd);
-            APP.with(|cell| cell.borrow_mut().set_status(&format!("结束: {ts}\r\n录制中断：{message}")));
+            APP.with(|cell| cell.borrow_mut().set_status(&format!(
+                "{}: {ts}\r\n{}：{}",
+                tr("Status", "end"),
+                tr("Status", "interrupted"),
+                message
+            )));
             0
         }
 
@@ -1575,7 +1856,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
             APP.with(|cell| {
                 let mut app = cell.borrow_mut();
                 if app.session.is_some() {
-                    app.stop_recording();
+                    app.stop_recording(StopReason::Exiting);
                 }
                 app.remove_tray_icon();
             });
@@ -1611,7 +1892,7 @@ pub fn run() -> i32 {
 
         // 让通用控件使用系统主题（主题清单由 build.rs 嵌入）
         load_config();
-        append_log("App started  v1.4");
+        append_log("App started  v1.5");
         let locale_snapshot = LOCALE.get().map(|s| s.as_str()).unwrap_or("?");
         APP.with(|cell| {
             let app = cell.borrow();
